@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { eq, sql } from "drizzle-orm";
 import { integer, pgTable, serial, text } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/pglite";
-import { type Middleware, withMiddleware } from "./pg.ts";
+import { type Middleware, withMiddleware } from "./src/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),

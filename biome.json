@@ -19,7 +19,7 @@
 	},
 	"overrides": [
 		{
-			"include": ["index.ts", "shared.ts", "pg.ts", "mysql.ts", "sqlite.ts"],
+			"include": ["src/**/*.ts"],
 			"linter": {
 				"rules": {
 					"suspicious": {

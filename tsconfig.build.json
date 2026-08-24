@@ -7,7 +7,7 @@
 		"declarationMap": true,
 		"sourceMap": true,
 		"outDir": "./dist",
-		"rootDir": ".",
+		"rootDir": "./src",
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
@@ -18,6 +18,6 @@
 		"lib": ["ES2022"],
 		"types": ["bun"]
 	},
-	"include": ["index.ts", "pg.ts", "mysql.ts", "sqlite.ts", "shared.ts"],
+	"include": ["src"],
 	"exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

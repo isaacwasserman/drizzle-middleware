@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
-import { type SyncMiddleware, withMiddleware } from "./sqlite.ts";
+import { type SyncMiddleware, withMiddleware } from "./src/sqlite.ts";
 
 const users = sqliteTable("users", {
 	id: integer("id").primaryKey({ autoIncrement: true }),

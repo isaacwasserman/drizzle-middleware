@@ -5,16 +5,16 @@ import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core/db";
 import {
 	type Middleware as MysqlMiddleware,
 	withMiddleware as withMysqlMiddleware,
-} from "./mysql.ts";
+} from "./src/mysql.ts";
 import {
 	type Middleware as PgMiddleware,
 	withMiddleware as withPgMiddleware,
-} from "./pg.ts";
+} from "./src/pg.ts";
 import {
 	type Middleware as SqliteMiddleware,
 	type SyncMiddleware as SyncSqliteMiddleware,
 	withMiddleware as withSqliteMiddleware,
-} from "./sqlite.ts";
+} from "./src/sqlite.ts";
 
 type Log = string[];
 
