@@ -1,0 +1,47 @@
+{
+	"name": "drizzle-middleware",
+	"version": "0.0.1",
+	"description": "Drizzle ORM query middleware",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		},
+		"./pg": {
+			"import": "./dist/pg.js",
+			"types": "./dist/pg.d.ts"
+		},
+		"./mysql": {
+			"import": "./dist/mysql.js",
+			"types": "./dist/mysql.d.ts"
+		},
+		"./sqlite": {
+			"import": "./dist/sqlite.js",
+			"types": "./dist/sqlite.d.ts"
+		}
+	},
+	"scripts": {
+		"prepare": "git config core.hooksPath .githooks",
+		"build": "tsc -p tsconfig.build.json",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"format": "biome format --write ."
+	},
+	"files": ["dist"],
+	"license": "MIT",
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"@changesets/cli": "^2.30.0",
+		"@electric-sql/pglite": "^0.5.7",
+		"@types/bun": "latest",
+		"drizzle-orm": "^0.45.2",
+		"typescript": "7"
+	},
+	"peerDependencies": {
+		"drizzle-orm": ">=0.45"
+	}
+}

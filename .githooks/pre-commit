@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -e
+
+bun run lint --write --unsafe
+git add -u .

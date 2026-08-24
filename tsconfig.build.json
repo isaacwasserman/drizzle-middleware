@@ -1,0 +1,23 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ES2022",
+		"moduleResolution": "bundler",
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"outDir": "./dist",
+		"rootDir": ".",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"isolatedModules": true,
+		"isolatedDeclarations": true,
+		"verbatimModuleSyntax": true,
+		"lib": ["ES2022"],
+		"types": ["bun"]
+	},
+	"include": ["index.ts", "pg.ts", "mysql.ts", "sqlite.ts", "shared.ts"],
+	"exclude": ["node_modules", "dist", "**/*.test.ts"]
+}
