@@ -32,6 +32,10 @@
 		"format": "biome format --write ."
 	},
 	"files": ["dist"],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/isaacwasserman/drizzle-middleware"
+	},
 	"license": "MIT",
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
