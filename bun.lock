@@ -14,7 +14,7 @@
         "typescript": "7",
       },
       "peerDependencies": {
-        "drizzle-orm": ">=0.45",
+        "drizzle-orm": ">=0.45.0 || >=1.0.0-0",
       },
     },
   },

@@ -47,8 +47,11 @@ function createMockPreparedQuery(
 	return pq;
 }
 
-function createMockSession(log: Log, opts?: { hasSetToken?: boolean }) {
-	return {
+function createMockSession(
+	log: Log,
+	opts?: { hasSetToken?: boolean; relationalQuery?: boolean },
+) {
+	const session: Record<string, any> = {
 		prepareQuery: (...args: unknown[]) => {
 			const id = (args[0] as { sql?: string })?.sql ?? "query";
 			log.push(`prepareQuery:${id}`);
@@ -66,6 +69,14 @@ function createMockSession(log: Log, opts?: { hasSetToken?: boolean }) {
 			return result;
 		},
 	};
+	if (opts?.relationalQuery) {
+		session.prepareRelationalQuery = (...args: unknown[]) => {
+			const id = (args[0] as { sql?: string })?.sql ?? "relQuery";
+			log.push(`prepareRelationalQuery:${id}`);
+			return createMockPreparedQuery(log, id, opts);
+		};
+	}
+	return session;
 }
 
 function createSyncMockSession(log: Log) {
@@ -102,6 +113,7 @@ interface AsyncVariant {
 	createDb: (session: any) => any;
 	withMiddleware: (db: any, mw: any) => any;
 	hasSetToken: boolean;
+	hasRelationalQuery: boolean;
 }
 
 interface SyncVariant {
@@ -117,6 +129,7 @@ const asyncVariants: AsyncVariant[] = [
 		createDb: (s) => new (PgDatabase as any)({}, s, undefined),
 		withMiddleware: withStablePg,
 		hasSetToken: true,
+		hasRelationalQuery: false,
 	},
 	{
 		name: "beta/pg",
@@ -124,6 +137,7 @@ const asyncVariants: AsyncVariant[] = [
 		createDb: (s) => new (PgAsyncDatabase as any)({}, s, {}, undefined),
 		withMiddleware: withBetaPg,
 		hasSetToken: true,
+		hasRelationalQuery: true,
 	},
 	{
 		name: "stable/mysql",
@@ -131,6 +145,7 @@ const asyncVariants: AsyncVariant[] = [
 		createDb: (s) => new (MySqlDatabase as any)({}, s, undefined, "default"),
 		withMiddleware: withStableMysql,
 		hasSetToken: false,
+		hasRelationalQuery: false,
 	},
 	{
 		name: "beta/mysql",
@@ -139,6 +154,7 @@ const asyncVariants: AsyncVariant[] = [
 			new (MySqlDatabaseBeta as any)({}, s, {}, undefined, "default"),
 		withMiddleware: withBetaMysql,
 		hasSetToken: false,
+		hasRelationalQuery: true,
 	},
 	{
 		name: "stable/sqlite-async",
@@ -146,6 +162,7 @@ const asyncVariants: AsyncVariant[] = [
 		createDb: (s) => new (BaseSQLiteDatabase as any)("async", {}, s, undefined),
 		withMiddleware: withStableSqlite,
 		hasSetToken: false,
+		hasRelationalQuery: false,
 	},
 	{
 		name: "beta/sqlite-async",
@@ -154,6 +171,7 @@ const asyncVariants: AsyncVariant[] = [
 			new (BaseSQLiteDatabaseBeta as any)("async", {}, s, {}, undefined),
 		withMiddleware: withBetaSqlite,
 		hasSetToken: false,
+		hasRelationalQuery: true,
 	},
 ];
 
@@ -178,7 +196,12 @@ const syncVariants: SyncVariant[] = [
 for (const v of asyncVariants) {
 	describe(`withMiddleware (${v.name})`, () => {
 		function mockDb(log: Log) {
-			return v.createDb(createMockSession(log, { hasSetToken: v.hasSetToken }));
+			return v.createDb(
+				createMockSession(log, {
+					hasSetToken: v.hasSetToken,
+					relationalQuery: v.hasRelationalQuery,
+				}),
+			);
 		}
 
 		test("returns a new db instance, not the original", () => {
@@ -485,6 +508,68 @@ for (const v of asyncVariants) {
 				const db = mockDb([]);
 				const wrapped = v.withMiddleware(db, (next: any) => next());
 				expect(wrapped.mode).toBe("default");
+			});
+		}
+
+		// -----------------------------------------------------------------------
+		// Conditional: prepareRelationalQuery (beta only)
+		// -----------------------------------------------------------------------
+
+		if (v.hasRelationalQuery) {
+			test("middleware runs around a relational query execute", async () => {
+				const log: Log = [];
+				const db = mockDb(log);
+
+				const wrapped = v.withMiddleware(db, async (next: any, _tx: any) => {
+					log.push("middleware:before");
+					const result = await next();
+					log.push("middleware:after");
+					return result;
+				});
+				const session = wrapped.session;
+				const prepared = session.prepareRelationalQuery({
+					sql: "SELECT rel",
+				});
+				await prepared.execute();
+
+				expect(log).toEqual([
+					"prepareRelationalQuery:SELECT rel",
+					"tx:begin",
+					"middleware:before",
+					"prepareRelationalQuery:SELECT rel",
+					"execute:SELECT rel",
+					"middleware:after",
+					"tx:end",
+				]);
+			});
+
+			test("middleware can short-circuit a relational query", async () => {
+				const log: Log = [];
+				const db = mockDb(log);
+
+				const wrapped = v.withMiddleware(db, async (_next: any) => {
+					log.push("middleware:short-circuit");
+					return [{ cached: true }];
+				});
+				const session = wrapped.session;
+				const prepared = session.prepareRelationalQuery({
+					sql: "SELECT rel",
+				});
+				const result = await prepared.execute();
+
+				expect(result).toEqual([{ cached: true }]);
+				expect(log).not.toContain("execute:SELECT rel");
+			});
+
+			test("relational query passes through when session lacks the method", () => {
+				const log: Log = [];
+				const sessionWithout = createMockSession(log, {
+					hasSetToken: v.hasSetToken,
+					relationalQuery: false,
+				});
+				const db = v.createDb(sessionWithout);
+				const wrapped = v.withMiddleware(db, (next: any) => next());
+				expect(wrapped.session.prepareRelationalQuery).toBeUndefined();
 			});
 		}
 	});
