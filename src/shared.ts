@@ -5,6 +5,8 @@
 
 export type InternalSession = {
 	prepareQuery: (...args: any[]) => InternalPreparedQuery;
+	prepareRelationalQuery?: (...args: any[]) => InternalPreparedQuery;
+	prepareOneTimeRelationalQuery?: (...args: any[]) => InternalPreparedQuery;
 	transaction: (fn: (tx: any) => any, config?: unknown) => any;
 };
 
@@ -32,7 +34,23 @@ function wrapSession(
 			if (prop === "prepareQuery") {
 				return (...args: any[]) => {
 					const prepared = target.prepareQuery(...args);
-					return wrapPreparedQuery(prepared, args, target, middleware);
+					return wrapPreparedQuery(
+						prepared,
+						args,
+						"prepareQuery",
+						target,
+						middleware,
+					);
+				};
+			}
+			if (
+				(prop === "prepareRelationalQuery" ||
+					prop === "prepareOneTimeRelationalQuery") &&
+				typeof (target as any)[prop] === "function"
+			) {
+				return (...args: any[]) => {
+					const prepared = (target as any)[prop](...args);
+					return wrapPreparedQuery(prepared, args, prop, target, middleware);
 				};
 			}
 			if (prop === "transaction") {
@@ -53,6 +71,7 @@ const EXEC_METHODS = new Set(["execute", "run", "all", "get", "values"]);
 function wrapPreparedQuery(
 	prepared: InternalPreparedQuery,
 	capturedArgs: unknown[],
+	prepareMethod: string,
 	session: InternalSession,
 	middleware: MiddlewareFn,
 ): InternalPreparedQuery {
@@ -68,7 +87,9 @@ function wrapPreparedQuery(
 					return session.transaction((tx) => {
 						return middleware(() => {
 							const txSession = (tx as any).session as InternalSession;
-							const txPrepared = txSession.prepareQuery(...capturedArgs) as any;
+							const txPrepared = (txSession as any)[prepareMethod](
+								...capturedArgs,
+							) as any;
 							if (storedToken && txPrepared.setToken)
 								txPrepared.setToken(storedToken);
 							if (target.joinsNotNullableMap)
