@@ -1,6 +1,6 @@
 {
 	"name": "drizzle-middleware",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"description": "Drizzle ORM query middleware",
 	"type": "module",
 	"main": "./dist/index.js",
