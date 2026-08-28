@@ -145,6 +145,43 @@ describe("e2e: pglite", () => {
 		expect(auditLog).toEqual([{ action: "query", count: 1 }]);
 	});
 
+	test("config set in a subquery applies to peer transaction queries", async () => {
+		const db = await createTestDb();
+		await db.insert(users).values({ name: "Grace" });
+		let peerQueryApplicationName: string | undefined;
+
+		const wrapped = withMiddleware(db, async (next, tx) => {
+			const config = tx
+				.select({
+					value:
+						sql<string>`set_config('application_name', 'drizzle-middleware', true)`.as(
+							"value",
+						),
+				})
+				.from(sql`(select 1) as seed`)
+				.as("config");
+			await tx.select().from(config);
+
+			const [peerQuery] = await tx
+				.select({
+					applicationName: sql<string>`current_setting('application_name')`,
+				})
+				.from(users);
+			peerQueryApplicationName = peerQuery?.applicationName;
+
+			return next();
+		});
+
+		const rows = await wrapped
+			.select({
+				applicationName: sql<string>`current_setting('application_name')`,
+			})
+			.from(users);
+
+		expect(peerQueryApplicationName).toBe("drizzle-middleware");
+		expect(rows).toEqual([{ applicationName: "drizzle-middleware" }]);
+	});
+
 	test("middleware can short-circuit and prevent the query", async () => {
 		const db = await createTestDb();
 

@@ -52,7 +52,9 @@ The middleware receives a transaction object as its second argument. You can run
 
 ```ts
 const secured = withMiddleware(db, async (next, tx) => {
-  await tx.execute(sql`SET LOCAL role = ${sql.raw(currentUser.role)}`);
+  await tx
+    .select()
+    .from(sql`set_config('role', ${currentUser.role}, true)`);
   return next();
 });
 ```
