@@ -17,7 +17,7 @@ const kvStore = pgTable("kv", {
 
 async function createTestDb() {
 	const client = new PGlite();
-	const db = drizzle(client);
+	const db = drizzle({ client });
 	await db.execute(
 		sql`CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`,
 	);
