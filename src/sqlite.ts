@@ -1,30 +1,35 @@
-import type {
-	BaseSQLiteDatabase,
-	SQLiteTransaction,
-} from "drizzle-orm/sqlite-core";
-import { buildWrappedDb } from "./shared.js";
+import { entityKind } from "drizzle-orm-beta";
+import type { BaseSQLiteDatabase } from "drizzle-orm-beta/sqlite-core";
+import { type Middleware, buildWrappedDb, executeBatch } from "./shared.js";
 
-export type Middleware = (
-	next: () => Promise<unknown>,
-	tx: SQLiteTransaction<"async", any, any, any>,
-) => Promise<unknown>;
+export type { Middleware };
 
-export type SyncMiddleware = (
-	next: () => unknown,
-	tx: SQLiteTransaction<"sync", any, any, any>,
-) => unknown;
+const UNSUPPORTED_DRIVERS = new Set([
+	"SQLiteRemoteSession",
+	"PrismaSQLiteSession",
+]);
 
 export function withMiddleware<
-	TDb extends BaseSQLiteDatabase<"async", any, any, any>,
->(db: TDb, middleware: Middleware): TDb;
-export function withMiddleware<
-	TDb extends BaseSQLiteDatabase<"sync", any, any, any>,
->(db: TDb, middleware: SyncMiddleware): TDb;
-export function withMiddleware(db: any, middleware: any): any {
-	return buildWrappedDb(db, middleware, (d, session, schema) => [
-		d.resultKind,
-		d.dialect,
-		session,
-		schema,
-	]);
+	TDb extends BaseSQLiteDatabase<any, any, any, any>,
+>(db: TDb, middleware: Middleware): TDb {
+	const d = db as any;
+	const kind: string = d.session?.constructor?.[entityKind] ?? "";
+	if (UNSUPPORTED_DRIVERS.has(kind)) {
+		throw new Error(
+			`withMiddleware is not compatible with ${kind}. This driver has no multi-statement, batch, or transaction support.`,
+		);
+	}
+	return buildWrappedDb(d, middleware, {
+		rawPrepareArgs: () => [undefined, "all", false],
+		txPrepareArgs: () => [undefined, "run", false],
+		makeDbArgs: (d, dialect, session, schemaArg) => [
+			d.resultKind,
+			dialect,
+			session,
+			d._.relations,
+			schemaArg,
+		],
+		isSync: d.resultKind === "sync",
+		execBatch: d.resultKind === "sync" ? undefined : executeBatch,
+	}) as TDb;
 }

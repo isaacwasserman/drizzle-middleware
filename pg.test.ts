@@ -3,13 +3,23 @@ import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
 import { PgAsyncDatabase, integer, pgTable } from "drizzle-orm-beta/pg-core";
-import {
-	type BatchMiddleware,
-	PG_DRIVER_KINDS,
-	withBatchMiddleware,
-} from "./src/beta/pg-batch.ts";
+import { type Middleware, withMiddleware } from "./src/pg.ts";
 
 type Log = string[];
+
+const EXPECTED_SESSION_KINDS = new Set([
+	"NodePgSession",
+	"NeonSession",
+	"VercelPgSession",
+	"NetlifyDbSession",
+	"NetlifyDbWsSession",
+	"PgliteSession",
+	"PostgresJsSession",
+	"EffectPgSession",
+	"NeonHttpSession",
+	"XataHttpSession",
+	"PgRemoteSession",
+]);
 
 const users = pgTable("users", {
 	id: integer("id").notNull(),
@@ -106,10 +116,10 @@ function getCombinedPrepare(log: Log): string {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("withBatchMiddleware (beta/pg)", () => {
+describe("withMiddleware (pg)", () => {
 	test("returns a new db instance", () => {
 		const db = mockDb([]);
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped).not.toBe(db);
 	});
 
@@ -117,7 +127,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const db = mockDb([]);
 		db.$client = { fake: "client" };
 		db.$cache = { fake: "cache" };
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.$client).toEqual({ fake: "client" });
 		expect(wrapped.$cache).toEqual({ fake: "cache" });
 	});
@@ -125,7 +135,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 	test("fast path: no before/after skips transaction", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 
 		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
 		await prepared.execute();
@@ -138,13 +148,13 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const middleware: BatchMiddleware = () => ({
+		const middleware: Middleware = () => ({
 			before: [
 				sql`SELECT set_config('a', 'one', true)`,
 				sql`SELECT set_config('b', 'two', true)`,
 			],
 		});
-		const wrapped = withBatchMiddleware(db, middleware);
+		const wrapped = withMiddleware(db, middleware);
 
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT 1",
@@ -163,10 +173,10 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const middleware: BatchMiddleware = () => ({
+		const middleware: Middleware = () => ({
 			after: [sql`SELECT set_config('a', '', true)`],
 		});
-		const wrapped = withBatchMiddleware(db, middleware);
+		const wrapped = withMiddleware(db, middleware);
 
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT 1",
@@ -183,11 +193,11 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const middleware: BatchMiddleware = () => ({
+		const middleware: Middleware = () => ({
 			before: [sql`SELECT set_config('role', 'app', true)`],
 			after: [sql`SELECT set_config('role', '', true)`],
 		});
-		const wrapped = withBatchMiddleware(db, middleware);
+		const wrapped = withMiddleware(db, middleware);
 
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT users",
@@ -208,10 +218,10 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const db = mockDb(log);
 
 		const tenantId = "tenant-42";
-		const middleware: BatchMiddleware = () => ({
+		const middleware: Middleware = () => ({
 			before: [sql`SELECT set_config('app.tenant', ${tenantId}, true)`],
 		});
-		const wrapped = withBatchMiddleware(db, middleware);
+		const wrapped = withMiddleware(db, middleware);
 
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT 1",
@@ -231,7 +241,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		expect((beforeSql as any).shouldInlineParams).toBe(false);
 		expect((afterSql as any).shouldInlineParams).toBe(false);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [beforeSql],
 			after: [afterSql],
 		}));
@@ -247,7 +257,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -267,7 +277,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -286,7 +296,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -308,7 +318,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT set_config('a', 'x', true)`],
 		}));
 
@@ -327,7 +337,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT set_config('a', 'x', true)`],
 			after: [sql`SELECT set_config('a', '', true)`],
 		}));
@@ -349,14 +359,14 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const middleware: BatchMiddleware = () => ({
+		const middleware: Middleware = () => ({
 			before: [
 				sql`SELECT set_config('a', 'x', true)`,
 				sql`SELECT set_config('b', 'y', true)`,
 			],
 			after: [sql`SELECT set_config('a', '', true)`],
 		});
-		const wrapped = withBatchMiddleware(db, middleware);
+		const wrapped = withMiddleware(db, middleware);
 
 		await wrapped.session.transaction(async (tx: any) => {
 			log.push("user:callback");
@@ -406,7 +416,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 			{},
 			undefined,
 		);
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -420,7 +430,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT set_config('a', 'x', true)`],
 		}));
 
@@ -440,7 +450,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const db = mockDb(log);
 		db.session.customProp = "hello";
 
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.session.customProp).toBe("hello");
 	});
 
@@ -452,7 +462,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -475,7 +485,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -490,7 +500,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 	test("object-mode rows are mapped to selected fields", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -512,6 +522,17 @@ describe("withBatchMiddleware (beta/pg)", () => {
 
 		class NodePgLikeSession {
 			static [entityKind] = "NodePgSession";
+
+			client = {
+				async query(sqlStr: string) {
+					log.push(`client.query:${sqlStr}`);
+					const stmtCount = (sqlStr.match(/;\n/g) || []).length + 1;
+					if (stmtCount > 1) {
+						return Array.from({ length: stmtCount }, (_, i) => [{ id: i + 1 }]);
+					}
+					return [{ id: 1 }];
+				},
+			};
 
 			prepareQuery(...args: unknown[]) {
 				const q = args[0] as { sql?: string };
@@ -554,7 +575,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 			undefined,
 		);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			after: [sql`SELECT set_config('a', '', true)`],
 		}));
 
@@ -572,7 +593,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`SELECT set_config('a', 'x', true)`,
 				sql`SELECT set_config('b', 'y', true)`,
@@ -592,7 +613,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			after: [
 				sql`SELECT set_config('a', '', true)`,
 				sql`SELECT set_config('b', '', true)`,
@@ -612,7 +633,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`SELECT set_config('a', 'x', true)`,
 				sql`SELECT set_config('b', 'y', true)`,
@@ -637,7 +658,7 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`SELECT set_config('a', 'x', true)`,
 				sql`SELECT set_config('b', 'y', true)`,
@@ -655,45 +676,29 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		expect(prepareCallsInTx.length).toBe(3);
 	});
 
-	// -------------------------------------------------------------------
-	// Driver coverage drift detection
-	// -------------------------------------------------------------------
-
-	test("PG_DRIVER_KINDS covers every PG session in drizzle-orm-beta", () => {
-		const ABSTRACT_KINDS = new Set(["PgSession"]);
+	test("covers every PG session in drizzle-orm-beta", () => {
 		const sessionKinds = new Set<string>();
-		const dirs = readdirSync("node_modules/drizzle-orm-beta", {
+		for (const dir of readdirSync("node_modules/drizzle-orm-beta", {
 			withFileTypes: true,
-		});
-		for (const d of dirs) {
-			if (!d.isDirectory()) continue;
-			let sessionSrc: string;
+		})) {
+			if (!dir.isDirectory()) continue;
 			try {
-				sessionSrc = require("node:fs").readFileSync(
-					`node_modules/drizzle-orm-beta/${d.name}/session.js`,
+				const source = require("node:fs").readFileSync(
+					`node_modules/drizzle-orm-beta/${dir.name}/session.js`,
 					"utf8",
 				);
+				if (!source.includes("PgAsyncSession") && !source.includes("PgSession"))
+					continue;
+				for (const match of source.matchAll(
+					/\[entityKind\]\s*=\s*"([^"]*Session[^"]*)"/g,
+				)) {
+					if (match[1] !== "PgSession") sessionKinds.add(match[1]!);
+				}
 			} catch {
-				continue;
-			}
-			if (
-				!sessionSrc.includes("PgAsyncSession") &&
-				!sessionSrc.includes("PgSession")
-			)
-				continue;
-			const matches = sessionSrc.matchAll(
-				/\[entityKind\]\s*=\s*"([^"]*Session[^"]*)"/g,
-			);
-			for (const m of matches) {
-				if (!ABSTRACT_KINDS.has(m[1]!)) sessionKinds.add(m[1]!);
+				// The driver does not expose a runtime session module.
 			}
 		}
 
-		const covered = new Set<string>(PG_DRIVER_KINDS);
-		const uncovered = [...sessionKinds].filter((k) => !covered.has(k));
-		const stale = [...covered].filter((k) => !sessionKinds.has(k));
-
-		expect(uncovered).toEqual([]);
-		expect(stale).toEqual([]);
+		expect(sessionKinds).toEqual(EXPECTED_SESSION_KINDS);
 	});
 });
