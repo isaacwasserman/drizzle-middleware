@@ -1,10 +1,27 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
 import { BaseSQLiteDatabase as BaseSQLiteDatabaseBeta } from "drizzle-orm-beta/sqlite-core";
 import { type Middleware, withMiddleware } from "./src/sqlite.ts";
 
 type Log = string[];
+
+const EXPECTED_SESSION_KINDS = new Set([
+	"SQLiteBunSession",
+	"BetterSQLiteSession",
+	"SQLJsSession",
+	"SQLiteDOSession",
+	"ExpoSQLiteSession",
+	"OPSQLiteSession",
+	"LibSQLSession",
+	"SQLiteD1Session",
+	"SQLiteRemoteSession",
+	"SQLiteCloudSession",
+	"TursoDatabaseSession",
+	"BunSQLiteSession",
+	"PrismaSQLiteSession",
+]);
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -361,5 +378,37 @@ describe("withMiddleware (sqlite)", () => {
 		const result = await prepared.execute();
 
 		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	test("covers every SQLite session in drizzle-orm-beta", () => {
+		const sessionKinds = new Set<string>();
+		for (const dir of readdirSync("node_modules/drizzle-orm-beta", {
+			withFileTypes: true,
+		})) {
+			if (!dir.isDirectory()) continue;
+			for (const path of [
+				`node_modules/drizzle-orm-beta/${dir.name}/session.js`,
+				`node_modules/drizzle-orm-beta/${dir.name}/sqlite/session.js`,
+			]) {
+				try {
+					const source = require("node:fs").readFileSync(path, "utf8");
+					if (
+						!source.includes("SQLiteSession") &&
+						!source.includes("SqliteSession") &&
+						!source.includes("SQLitePreparedQuery")
+					)
+						continue;
+					for (const match of source.matchAll(
+						/\[entityKind\]\s*=\s*"([^"]*Session[^"]*)"/g,
+					)) {
+						if (match[1] !== "SQLiteSession") sessionKinds.add(match[1]!);
+					}
+				} catch {
+					// The driver does not expose a runtime session module.
+				}
+			}
+		}
+
+		expect(sessionKinds).toEqual(EXPECTED_SESSION_KINDS);
 	});
 });

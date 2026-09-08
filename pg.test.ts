@@ -1,10 +1,25 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
 import { PgAsyncDatabase, integer, pgTable } from "drizzle-orm-beta/pg-core";
 import { type Middleware, withMiddleware } from "./src/pg.ts";
 
 type Log = string[];
+
+const EXPECTED_SESSION_KINDS = new Set([
+	"NodePgSession",
+	"NeonSession",
+	"VercelPgSession",
+	"NetlifyDbSession",
+	"NetlifyDbWsSession",
+	"PgliteSession",
+	"PostgresJsSession",
+	"EffectPgSession",
+	"NeonHttpSession",
+	"XataHttpSession",
+	"PgRemoteSession",
+]);
 
 const users = pgTable("users", {
 	id: integer("id").notNull(),
@@ -659,5 +674,31 @@ describe("withMiddleware (pg)", () => {
 			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
 		);
 		expect(prepareCallsInTx.length).toBe(3);
+	});
+
+	test("covers every PG session in drizzle-orm-beta", () => {
+		const sessionKinds = new Set<string>();
+		for (const dir of readdirSync("node_modules/drizzle-orm-beta", {
+			withFileTypes: true,
+		})) {
+			if (!dir.isDirectory()) continue;
+			try {
+				const source = require("node:fs").readFileSync(
+					`node_modules/drizzle-orm-beta/${dir.name}/session.js`,
+					"utf8",
+				);
+				if (!source.includes("PgAsyncSession") && !source.includes("PgSession"))
+					continue;
+				for (const match of source.matchAll(
+					/\[entityKind\]\s*=\s*"([^"]*Session[^"]*)"/g,
+				)) {
+					if (match[1] !== "PgSession") sessionKinds.add(match[1]!);
+				}
+			} catch {
+				// The driver does not expose a runtime session module.
+			}
+		}
+
+		expect(sessionKinds).toEqual(EXPECTED_SESSION_KINDS);
 	});
 });
