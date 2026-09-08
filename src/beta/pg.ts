@@ -20,3 +20,8 @@ export function withMiddleware<TDb extends PgAsyncDatabase<any, any, any, any>>(
 		schema,
 	]) as TDb;
 }
+
+export {
+	withBatchMiddleware,
+	type BatchMiddleware,
+} from "./pg-batch.js";

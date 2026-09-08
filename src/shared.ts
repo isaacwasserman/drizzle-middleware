@@ -20,6 +20,7 @@ export type InternalPreparedQuery = {
 };
 
 export type MiddlewareFn = (next: () => any, tx: any) => any;
+export type MiddlewareBatchFn = (tx: any) => { before?: any[]; after?: any[] };
 
 // ---------------------------------------------------------------------------
 // Shared wrapping logic
