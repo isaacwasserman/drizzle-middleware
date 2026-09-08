@@ -1,5 +1,5 @@
 import type { SQL } from "drizzle-orm-beta";
-import { entityKind, sql as sqlTag } from "drizzle-orm-beta";
+import { Param, entityKind, sql as sqlTag } from "drizzle-orm-beta";
 
 // @ts-ignore — exported at runtime but missing from .d.ts
 import { mapResultRow } from "drizzle-orm-beta/utils";
@@ -12,6 +12,7 @@ export type BatchMiddleware = () => {
 export type ExtractInnerResult = (
 	rawResult: any,
 	beforeCount: number,
+	afterCount: number,
 	session: any,
 ) => any;
 
@@ -31,9 +32,38 @@ type InternalSession = {
 
 const EXEC_METHODS = new Set(["execute", "run", "all", "get", "values"]);
 
+function resolveChunk(chunk: any, values: Record<string, unknown>): any {
+	if (!chunk) return chunk;
+	const kind: string | undefined = chunk.constructor?.[entityKind];
+	if (kind === "Placeholder") return new Param(values[chunk.name]);
+	if (
+		kind === "Param" &&
+		chunk.value?.constructor?.[entityKind] === "Placeholder"
+	)
+		return new Param(values[chunk.value.name], chunk.encoder);
+	if (kind === "SQL") return resolvePlaceholders(chunk, values);
+	if (Array.isArray(chunk))
+		return chunk.map((c: any) => resolveChunk(c, values));
+	return chunk;
+}
+
+export function resolvePlaceholders(
+	sqlObj: SQL,
+	values: Record<string, unknown>,
+): SQL {
+	const chunks: any[] = (sqlObj as any).queryChunks;
+	const resolved = new (sqlObj.constructor as any)(
+		chunks.map((c) => resolveChunk(c, values)),
+	);
+	return resolved;
+}
+
 export function inlineSql(sqlObj: SQL, dialect: any): string {
+	const prev = (sqlObj as any).shouldInlineParams;
 	(sqlObj as any).shouldInlineParams = true;
-	return dialect.sqlToQuery(sqlObj).sql;
+	const result = dialect.sqlToQuery(sqlObj).sql;
+	(sqlObj as any).shouldInlineParams = prev;
+	return result;
 }
 
 export function mapExtractedResult(
@@ -137,6 +167,8 @@ function execBatchSync(
 
 // -----------------------------------------------------------------------
 // Async execution path — concatenates all queries into one round-trip.
+// Placeholder params in the inner query are resolved from execArgs
+// before inlining so they become concrete literals in the SQL string.
 // -----------------------------------------------------------------------
 
 function execBatchAsync(
@@ -152,9 +184,14 @@ function execBatchAsync(
 	prop: string,
 	execArgs: any[],
 ) {
+	const placeholderValues = execArgs[0] as Record<string, unknown> | undefined;
+	const resolvedSql = placeholderValues
+		? resolvePlaceholders(capturedSqlObj, placeholderValues)
+		: capturedSqlObj;
+
 	const parts: string[] = [];
 	for (const s of before) parts.push(inlineSql(s, dialect));
-	parts.push(inlineSql(capturedSqlObj, dialect));
+	parts.push(inlineSql(resolvedSql, dialect));
 	for (const s of after) parts.push(inlineSql(s, dialect));
 
 	// PostgreSQL executes all statements in one Simple Query message inside an
@@ -170,7 +207,12 @@ function execBatchAsync(
 
 	const rawResult = rawPrepared.execute();
 	return Promise.resolve(rawResult).then((result) => {
-		const extracted = config.extractInnerResult(result, before.length, session);
+		const extracted = config.extractInnerResult(
+			result,
+			before.length,
+			after.length,
+			session,
+		);
 		return mapExtractedResult(extracted, capturedArgs, joinsNotNullableMap);
 	});
 }

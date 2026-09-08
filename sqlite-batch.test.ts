@@ -271,6 +271,98 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 	});
 
 	// -------------------------------------------------------------------
+	// Placeholder resolution
+	// -------------------------------------------------------------------
+
+	test("placeholder values are resolved and inlined into concatenated query", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			before: [sql`SELECT 1`],
+		}));
+
+		const innerSql = sql`SELECT * FROM users WHERE id = ${sql.placeholder("userId")}`;
+		const query = (wrapped as any).dialect.sqlToQuery(innerSql);
+		const prepared = wrapped.session.prepareQuery(query);
+		await prepared.execute({ userId: 42 });
+
+		expect(log).not.toContain("tx:begin");
+		const combined = getCombinedPrepare(log);
+		expect(combined).toContain("42");
+	});
+
+	// -------------------------------------------------------------------
+	// After-only extraction
+	// -------------------------------------------------------------------
+
+	test("after-only: inner result is extracted from multi-statement response", async () => {
+		const log: Log = [];
+
+		class LibSQLLikeSession {
+			static [entityKind] = "LibSQLSession";
+
+			prepareQuery(...args: unknown[]) {
+				const q = args[0] as { sql?: string };
+				const sqlStr = q?.sql ?? "query";
+				log.push(`prepareQuery:${sqlStr}`);
+				const stmtCount = (sqlStr.match(/;\n/g) || []).length + 1;
+				return {
+					execute: async () => {
+						log.push(`execute:${sqlStr}`);
+						if (stmtCount > 1) {
+							return Array.from({ length: stmtCount }, (_, i) => [
+								{ id: i + 1 },
+							]);
+						}
+						return [{ id: 1 }];
+					},
+					all: async () => {
+						log.push(`all:${sqlStr}`);
+						return [{ id: 1 }];
+					},
+					run: async () => {
+						log.push(`run:${sqlStr}`);
+						return { changes: 0, lastInsertRowid: 0 };
+					},
+					joinsNotNullableMap: undefined,
+					setToken(token: unknown) {
+						return this;
+					},
+				};
+			}
+
+			async transaction(
+				fn: (tx: unknown) => Promise<unknown>,
+				_config?: unknown,
+			) {
+				log.push("tx:begin");
+				const tx = { session: new LibSQLLikeSession() };
+				const result = await fn(tx);
+				log.push("tx:end");
+				return result;
+			}
+		}
+
+		const db = new (BaseSQLiteDatabaseBeta as any)(
+			"async",
+			mockDialect,
+			new LibSQLLikeSession(),
+			{},
+			undefined,
+		);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			after: [sql`SELECT 1`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		const result = await prepared.execute();
+
+		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	// -------------------------------------------------------------------
 	// Driver coverage drift detection
 	// -------------------------------------------------------------------
 

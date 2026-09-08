@@ -23,9 +23,10 @@ export const SQLITE_DRIVER_KINDS = [
 function extractInnerResult(
 	rawResult: any,
 	beforeCount: number,
+	afterCount: number,
 	session: any,
 ): any {
-	if (beforeCount === 0) return rawResult;
+	if (beforeCount === 0 && afterCount === 0) return rawResult;
 
 	const kind: string = session.constructor?.[entityKind] ?? "";
 

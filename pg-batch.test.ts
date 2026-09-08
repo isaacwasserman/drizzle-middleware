@@ -222,6 +222,27 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		expect(combined).toContain("'tenant-42'");
 	});
 
+	test("inlineSql does not leak shouldInlineParams onto middleware SQL", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+
+		const beforeSql = sql`SELECT set_config('a', ${"x"}, true)`;
+		const afterSql = sql`SELECT set_config('a', ${"y"}, true)`;
+		expect((beforeSql as any).shouldInlineParams).toBe(false);
+		expect((afterSql as any).shouldInlineParams).toBe(false);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			before: [beforeSql],
+			after: [afterSql],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		expect((beforeSql as any).shouldInlineParams).toBe(false);
+		expect((afterSql as any).shouldInlineParams).toBe(false);
+	});
+
 	test("inner query params are inlined via dialect capture", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
@@ -277,6 +298,51 @@ describe("withBatchMiddleware (beta/pg)", () => {
 
 		const execEntries = log.filter((l) => l.startsWith("execute:"));
 		expect(execEntries.length).toBe(1);
+	});
+
+	// -------------------------------------------------------------------
+	// Placeholder resolution
+	// -------------------------------------------------------------------
+
+	test("placeholder values are resolved and inlined into concatenated query", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const innerSql = sql`SELECT * FROM users WHERE id = ${sql.placeholder("userId")}`;
+		const query = (wrapped as any).dialect.sqlToQuery(innerSql);
+		const prepared = wrapped.session.prepareQuery(query);
+		await prepared.execute({ userId: 42 });
+
+		expect(log).not.toContain("tx:begin");
+		const combined = getCombinedPrepare(log);
+		expect(combined).toContain("42");
+		expect(combined).not.toContain("$1");
+	});
+
+	test("placeholder query uses single round trip, not tx fallback", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+			after: [sql`SELECT set_config('a', '', true)`],
+		}));
+
+		const innerSql = sql`SELECT * FROM users WHERE id = ${sql.placeholder("userId")} AND name = ${sql.placeholder("name")}`;
+		const query = (wrapped as any).dialect.sqlToQuery(innerSql);
+		const prepared = wrapped.session.prepareQuery(query);
+		await prepared.execute({ userId: 7, name: "alice" });
+
+		expect(log).not.toContain("tx:begin");
+		expect(log.filter((l) => l.startsWith("execute:")).length).toBe(1);
+
+		const combined = getCombinedPrepare(log);
+		expect(combined).toContain("7");
+		expect(combined).toContain("'alice'");
 	});
 
 	test("user-managed transaction: before/after run individually at boundaries", async () => {
@@ -432,6 +498,67 @@ describe("withBatchMiddleware (beta/pg)", () => {
 			{ sql: "SELECT id FROM users" },
 			[{ path: ["id"], field: users.id }],
 		);
+		const result = await prepared.execute();
+
+		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	// -------------------------------------------------------------------
+	// After-only extraction
+	// -------------------------------------------------------------------
+
+	test("after-only: inner result is extracted from multi-statement response", async () => {
+		const log: Log = [];
+
+		class NodePgLikeSession {
+			static [entityKind] = "NodePgSession";
+
+			prepareQuery(...args: unknown[]) {
+				const q = args[0] as { sql?: string };
+				const sqlStr = q?.sql ?? "query";
+				log.push(`prepareQuery:${sqlStr}`);
+				const stmtCount = (sqlStr.match(/;\n/g) || []).length + 1;
+				return {
+					execute: async () => {
+						log.push(`execute:${sqlStr}`);
+						if (stmtCount > 1) {
+							return Array.from({ length: stmtCount }, (_, i) => [
+								{ id: i + 1 },
+							]);
+						}
+						return [{ id: 1 }];
+					},
+					joinsNotNullableMap: undefined,
+					setToken(token: unknown) {
+						return this;
+					},
+				};
+			}
+
+			async transaction(
+				fn: (tx: unknown) => Promise<unknown>,
+				_config?: unknown,
+			) {
+				log.push("tx:begin");
+				const tx = { session: new NodePgLikeSession() };
+				const result = await fn(tx);
+				log.push("tx:end");
+				return result;
+			}
+		}
+
+		const db = new (PgAsyncDatabase as any)(
+			mockDialect,
+			new NodePgLikeSession(),
+			{},
+			undefined,
+		);
+
+		const wrapped = withBatchMiddleware(db, () => ({
+			after: [sql`SELECT set_config('a', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
 		const result = await prepared.execute();
 
 		expect(result).toEqual([{ id: 1 }]);
