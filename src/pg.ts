@@ -16,15 +16,26 @@ export function withMiddleware<TDb extends PgAsyncDatabase<any, any, any, any>>(
 			`withMiddleware is not compatible with ${kind}. This driver has no multi-statement, batch, or transaction support.`,
 		);
 	}
+	const isTransaction =
+		(db as any).constructor?.[entityKind] === "PgAsyncTransaction";
 	return buildWrappedDb(db as any, middleware, {
 		rawPrepareArgs: () => [undefined, undefined, false],
 		txPrepareArgs: () => [undefined, undefined, false],
-		makeDbArgs: (d, dialect, session, schemaArg) => [
-			dialect,
-			session,
-			d._.relations,
-			schemaArg,
-		],
+		makeDbArgs: isTransaction
+			? (d, dialect, session, schemaArg) => [
+					dialect,
+					session,
+					d._.relations,
+					schemaArg,
+					d.nestedIndex,
+				]
+			: (d, dialect, session, schemaArg) => [
+					dialect,
+					session,
+					d._.relations,
+					schemaArg,
+				],
+		isTransactionInput: isTransaction,
 		execBatch: executeBatch,
 	}) as TDb;
 }

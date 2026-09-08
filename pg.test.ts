@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
-import { PgAsyncDatabase, integer, pgTable } from "drizzle-orm-beta/pg-core";
+import {
+	PgAsyncDatabase,
+	PgAsyncTransaction,
+	integer,
+	pgTable,
+} from "drizzle-orm-beta/pg-core";
 import { type Middleware, withMiddleware } from "./src/pg.ts";
 
 type Log = string[];
@@ -674,6 +679,157 @@ describe("withMiddleware (pg)", () => {
 			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
 		);
 		expect(prepareCallsInTx.length).toBe(3);
+	});
+
+	// -------------------------------------------------------------------
+	// Transaction as input db
+	// -------------------------------------------------------------------
+
+	function mockTxDb(log: Log) {
+		return new (PgAsyncTransaction as any)(
+			mockDialect,
+			createMockSession(log),
+			{},
+			undefined,
+			0,
+		);
+	}
+
+	test("tx input: before + inner execute separately, correct order", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(2);
+		const beforeIdx = log.findIndex(
+			(l) => l.startsWith("execute:") && l.includes("set_config"),
+		);
+		const innerIdx = log.findIndex((l) => l === "execute:SELECT 1");
+		expect(beforeIdx).toBeLessThan(innerIdx);
+	});
+
+	test("tx input: inner + after execute separately, correct order", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			after: [sql`SELECT set_config('a', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(2);
+		const innerIdx = log.findIndex((l) => l === "execute:SELECT 1");
+		const afterIdx = log.findIndex(
+			(l) => l.startsWith("execute:") && l.includes("set_config"),
+		);
+		expect(innerIdx).toBeLessThan(afterIdx);
+	});
+
+	test("tx input: before + inner + after, all separate, correct order", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('role', 'app', true)`],
+			after: [sql`SELECT set_config('role', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT users" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(3);
+		const beforeIdx = log.findIndex(
+			(l) => l.startsWith("execute:") && l.includes("'app'"),
+		);
+		const innerIdx = log.findIndex(
+			(l) => l.startsWith("execute:") && l.includes("SELECT users"),
+		);
+		const afterIdx = log.findIndex(
+			(l) => l.startsWith("execute:") && l.includes("''"),
+		);
+		expect(beforeIdx).toBeLessThan(innerIdx);
+		expect(innerIdx).toBeLessThan(afterIdx);
+	});
+
+	test("tx input: no before/after uses fast path", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		expect(log).toEqual(["prepareQuery:SELECT 1", "execute:SELECT 1"]);
+	});
+
+	test("tx input: does not concatenate before+inner into one statement", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		const combined = log.find(
+			(l) => l.startsWith("prepareQuery:") && l.includes(";\n"),
+		);
+		expect(combined).toBeUndefined();
+	});
+
+	test("tx input: multiple before queries each get their own execute", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [
+				sql`SELECT set_config('a', 'x', true)`,
+				sql`SELECT set_config('b', 'y', true)`,
+				sql`SELECT set_config('c', 'z', true)`,
+			],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(4);
+	});
+
+	test("tx input: result comes from the inner query, not before/after", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+			after: [sql`SELECT set_config('a', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		const result = await prepared.execute();
+
+		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	test("tx input: no explicit tx opened (no tx:begin)", async () => {
+		const log: Log = [];
+		const txDb = mockTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+			after: [sql`SELECT set_config('a', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		expect(log).not.toContain("tx:begin");
 	});
 
 	test("covers every PG session in drizzle-orm-beta", () => {
