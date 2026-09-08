@@ -98,6 +98,15 @@ function mockDb(log: Log) {
 	);
 }
 
+function getCombinedPrepare(log: Log): string {
+	const entry = log.find(
+		(value) => value.startsWith("prepareQuery:") && value.includes(";\n"),
+	);
+	if (!entry)
+		throw new Error(`No combined query found in log: ${log.join(", ")}`);
+	return entry;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -144,13 +153,9 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		});
 		await prepared.execute();
 
-		const txStart = log.indexOf("tx:begin");
-		const txEnd = log.indexOf("tx:end");
-		const prepareCallsInTx = log.filter(
-			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
-		);
-		expect(prepareCallsInTx.length).toBe(1);
-		expect(prepareCallsInTx[0]).toContain(";\n");
+		expect(log).not.toContain("tx:begin");
+		const combined = getCombinedPrepare(log);
+		expect(combined).toContain(";\n");
 	});
 
 	test("params use ? syntax (SQLite), not $N (PG)", async () => {
@@ -167,11 +172,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		});
 		await prepared.execute();
 
-		const txStart = log.indexOf("tx:begin");
-		const txEnd = log.indexOf("tx:end");
-		const combined = log.filter(
-			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
-		)[0]!;
+		const combined = getCombinedPrepare(log);
 		expect(combined).toContain("'tenant-42'");
 		expect(combined).not.toContain("$1");
 		expect(combined).not.toContain("?");
@@ -190,16 +191,12 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const prepared = wrapped.session.prepareQuery(query);
 		await prepared.execute();
 
-		const txStart = log.indexOf("tx:begin");
-		const txEnd = log.indexOf("tx:end");
-		const combined = log.filter(
-			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
-		)[0]!;
+		const combined = getCombinedPrepare(log);
 		expect(combined).toContain("42");
 		expect(combined).toContain("'alice'");
 	});
 
-	test("standalone: 3 before + inner + 3 after = 1 prepareQuery inside tx", async () => {
+	test("standalone: 3 before + inner + 3 after = 1 prepareQuery call", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
@@ -213,12 +210,10 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		});
 		await prepared.execute();
 
-		const txStart = log.indexOf("tx:begin");
-		const txEnd = log.indexOf("tx:end");
-		const prepareCallsInTx = log.filter(
-			(l, i) => i > txStart && i < txEnd && l.startsWith("prepareQuery:"),
+		const combinedEntries = log.filter(
+			(l) => l.startsWith("prepareQuery:") && l.includes(";\n"),
 		);
-		expect(prepareCallsInTx.length).toBe(1);
+		expect(combinedEntries.length).toBe(1);
 	});
 
 	test("user tx: before/after run individually", async () => {

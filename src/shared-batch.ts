@@ -51,7 +51,13 @@ export function mapExtractedResult(
 	const rows = extracted?.rows ?? extracted;
 
 	if (customResultMapper) return customResultMapper(rows);
-	return rows.map((row: any) => mapResultRow(fields, row, joinsNotNullableMap));
+	return rows.map((row: any) =>
+		mapResultRow(
+			fields,
+			Array.isArray(row) ? row : Object.values(row),
+			joinsNotNullableMap,
+		),
+	);
 }
 
 export function wrapDialectCapture(dialect: any): {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
-import { PgAsyncDatabase } from "drizzle-orm-beta/pg-core";
+import { PgAsyncDatabase, integer, pgTable } from "drizzle-orm-beta/pg-core";
 import {
 	type BatchMiddleware,
 	PG_DRIVER_KINDS,
@@ -10,6 +10,10 @@ import {
 } from "./src/beta/pg-batch.ts";
 
 type Log = string[];
+
+const users = pgTable("users", {
+	id: integer("id").notNull(),
+});
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -412,6 +416,22 @@ describe("withBatchMiddleware (beta/pg)", () => {
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT 1",
 		});
+		const result = await prepared.execute();
+
+		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	test("object-mode rows are mapped to selected fields", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+		const wrapped = withBatchMiddleware(db, () => ({
+			before: [sql`SELECT 1`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery(
+			{ sql: "SELECT id FROM users" },
+			[{ path: ["id"], field: users.id }],
+		);
 		const result = await prepared.execute();
 
 		expect(result).toEqual([{ id: 1 }]);
