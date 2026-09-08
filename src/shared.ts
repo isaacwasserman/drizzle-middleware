@@ -124,6 +124,7 @@ export interface MiddlewareConfig {
 	txPrepareArgs: () => any[];
 	makeDbArgs: (d: any, dialect: any, session: any, schemaArg: any) => any[];
 	isSync?: boolean;
+	isTransactionInput?: boolean;
 	execBatch?: (statements: string[], session: any) => any;
 }
 
@@ -218,6 +219,28 @@ function execSync(
 }
 
 // -----------------------------------------------------------------------
+// Sync execution path — transaction input variant.
+// Before/after run individually through the existing transaction session;
+// the inner query executes via its original prepared query.
+// -----------------------------------------------------------------------
+
+function execSyncInTransaction(
+	before: SQL[],
+	after: SQL[],
+	session: InternalSession,
+	dialect: any,
+	config: MiddlewareConfig,
+	target: InternalPreparedQuery,
+	prop: string,
+	execArgs: any[],
+) {
+	for (const s of before) execSyncSideEffect(s, dialect, session, config);
+	const result = (target as any)[prop](...execArgs);
+	for (const s of after) execSyncSideEffect(s, dialect, session, config);
+	return result;
+}
+
+// -----------------------------------------------------------------------
 // Async execution path — inlines all params, then delegates to
 // config.execBatch which sends the statements in a single round trip
 // using the driver's preferred mechanism (Simple Query, HTTP batch, etc).
@@ -261,6 +284,44 @@ function execAsync(
 }
 
 // -----------------------------------------------------------------------
+// Async execution path — transaction input variant.
+// Before/after are batched separately; the inner query executes via its
+// original prepared query to stay within the input transaction.
+// -----------------------------------------------------------------------
+
+function execAsyncInTransaction(
+	before: SQL[],
+	after: SQL[],
+	session: InternalSession,
+	dialect: any,
+	config: MiddlewareConfig,
+	target: InternalPreparedQuery,
+	prop: string,
+	execArgs: any[],
+) {
+	const runBatch = async (stmts: SQL[]) => {
+		const parts = stmts.map((s) => inlineSql(s, dialect));
+		const result = config.execBatch?.(parts, session);
+		if (result !== undefined) {
+			await result;
+			return;
+		}
+		for (const stmt of parts) {
+			await session
+				.prepareQuery({ sql: stmt, params: [] }, ...config.txPrepareArgs())
+				.execute();
+		}
+	};
+
+	return (async () => {
+		if (before.length > 0) await runBatch(before);
+		const result = await (target as any)[prop](...execArgs);
+		if (after.length > 0) await runBatch(after);
+		return result;
+	})();
+}
+
+// -----------------------------------------------------------------------
 // Proxy wrappers
 // -----------------------------------------------------------------------
 
@@ -290,6 +351,31 @@ function wrapPreparedQuery(
 
 					if (before.length === 0 && after.length === 0) {
 						return (target as any)[prop](...execArgs);
+					}
+
+					if (config.isTransactionInput) {
+						if (config.isSync) {
+							return execSyncInTransaction(
+								before,
+								after,
+								session,
+								dialect,
+								config,
+								target,
+								prop,
+								execArgs,
+							);
+						}
+						return execAsyncInTransaction(
+							before,
+							after,
+							session,
+							dialect,
+							config,
+							target,
+							prop,
+							execArgs,
+						);
 					}
 
 					if (config.isSync) {

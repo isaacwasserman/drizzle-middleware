@@ -19,17 +19,28 @@ export function withMiddleware<
 			`withMiddleware is not compatible with ${kind}. This driver has no multi-statement, batch, or transaction support.`,
 		);
 	}
+	const isTransaction = d.constructor?.[entityKind] === "SQLiteTransaction";
 	return buildWrappedDb(d, middleware, {
 		rawPrepareArgs: () => [undefined, "all", false],
 		txPrepareArgs: () => [undefined, "run", false],
-		makeDbArgs: (d, dialect, session, schemaArg) => [
-			d.resultKind,
-			dialect,
-			session,
-			d._.relations,
-			schemaArg,
-		],
+		makeDbArgs: isTransaction
+			? (d, dialect, session, schemaArg) => [
+					d.resultKind,
+					dialect,
+					session,
+					d._.relations,
+					schemaArg,
+					d.nestedIndex,
+				]
+			: (d, dialect, session, schemaArg) => [
+					d.resultKind,
+					dialect,
+					session,
+					d._.relations,
+					schemaArg,
+				],
 		isSync: d.resultKind === "sync",
+		isTransactionInput: isTransaction,
 		execBatch: d.resultKind === "sync" ? undefined : executeBatch,
 	}) as TDb;
 }
