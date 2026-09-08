@@ -1,13 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
 import { BaseSQLiteDatabase as BaseSQLiteDatabaseBeta } from "drizzle-orm-beta/sqlite-core";
-import {
-	type BatchMiddleware,
-	SQLITE_DRIVER_KINDS,
-	withBatchMiddleware,
-} from "./src/beta/sqlite-batch.ts";
+import { type Middleware, withMiddleware } from "./src/sqlite.ts";
 
 type Log = string[];
 
@@ -111,10 +106,10 @@ function getCombinedPrepare(log: Log): string {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("withBatchMiddleware (beta/sqlite)", () => {
+describe("withMiddleware (sqlite)", () => {
 	test("returns a new db instance", () => {
 		const db = mockDb([]);
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped).not.toBe(db);
 	});
 
@@ -122,7 +117,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const db = mockDb([]);
 		db.$client = { fake: "client" };
 		db.$cache = { fake: "cache" };
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.$client).toEqual({ fake: "client" });
 		expect(wrapped.$cache).toEqual({ fake: "cache" });
 	});
@@ -130,7 +125,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 	test("fast path: no before/after skips transaction", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 
 		const prepared = wrapped.session.prepareQuery({
 			sql: "SELECT 1",
@@ -144,7 +139,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`, sql`SELECT 2`],
 		}));
 
@@ -163,7 +158,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const db = mockDb(log);
 
 		const tenantId = "tenant-42";
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT ${tenantId}`],
 		}));
 
@@ -182,7 +177,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -200,7 +195,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`, sql`SELECT 2`, sql`SELECT 3`],
 			after: [sql`SELECT 4`, sql`SELECT 5`, sql`SELECT 6`],
 		}));
@@ -220,7 +215,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`, sql`SELECT 2`],
 			after: [sql`SELECT 3`],
 		}));
@@ -242,7 +237,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -266,7 +261,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const db = mockDb(log);
 		db.session.customProp = "hello";
 
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.session.customProp).toBe("hello");
 	});
 
@@ -278,7 +273,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const log: Log = [];
 		const db = mockDb(log);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT 1`],
 		}));
 
@@ -301,6 +296,12 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 
 		class LibSQLLikeSession {
 			static [entityKind] = "LibSQLSession";
+
+			client = {
+				async batch(stmts: Array<{ sql: string; args: any[] }>) {
+					return stmts.map((s, i) => [{ id: i + 1 }]);
+				},
+			};
 
 			prepareQuery(...args: unknown[]) {
 				const q = args[0] as { sql?: string };
@@ -352,7 +353,7 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 			undefined,
 		);
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			after: [sql`SELECT 1`],
 		}));
 
@@ -360,51 +361,5 @@ describe("withBatchMiddleware (beta/sqlite)", () => {
 		const result = await prepared.execute();
 
 		expect(result).toEqual([{ id: 1 }]);
-	});
-
-	// -------------------------------------------------------------------
-	// Driver coverage drift detection
-	// -------------------------------------------------------------------
-
-	test("SQLITE_DRIVER_KINDS covers every SQLite session in drizzle-orm-beta", () => {
-		const ABSTRACT_KINDS = new Set(["SQLiteSession"]);
-		const sessionKinds = new Set<string>();
-		const dirs = readdirSync("node_modules/drizzle-orm-beta", {
-			withFileTypes: true,
-		});
-		for (const d of dirs) {
-			if (!d.isDirectory()) continue;
-			const checkPaths = [
-				`node_modules/drizzle-orm-beta/${d.name}/session.js`,
-				`node_modules/drizzle-orm-beta/${d.name}/sqlite/session.js`,
-			];
-			for (const p of checkPaths) {
-				let src: string;
-				try {
-					src = require("node:fs").readFileSync(p, "utf8");
-				} catch {
-					continue;
-				}
-				if (
-					!src.includes("SQLiteSession") &&
-					!src.includes("SqliteSession") &&
-					!src.includes("SQLitePreparedQuery")
-				)
-					continue;
-				const matches = src.matchAll(
-					/\[entityKind\]\s*=\s*"([^"]*Session[^"]*)"/g,
-				);
-				for (const m of matches) {
-					if (!ABSTRACT_KINDS.has(m[1]!)) sessionKinds.add(m[1]!);
-				}
-			}
-		}
-
-		const covered = new Set<string>(SQLITE_DRIVER_KINDS);
-		const uncovered = [...sessionKinds].filter((k) => !covered.has(k));
-		const stale = [...covered].filter((k) => !sessionKinds.has(k));
-
-		expect(uncovered).toEqual([]);
-		expect(stale).toEqual([]);
 	});
 });

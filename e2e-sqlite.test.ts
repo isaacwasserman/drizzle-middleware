@@ -2,10 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { eq, sql } from "drizzle-orm-beta";
 import { drizzle } from "drizzle-orm-beta/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm-beta/sqlite-core";
-import {
-	type BatchMiddleware,
-	withBatchMiddleware,
-} from "./src/beta/sqlite-batch.ts";
+import { type Middleware, withMiddleware } from "./src/sqlite.ts";
 
 const users = sqliteTable("users", {
 	id: integer("id").primaryKey({ autoIncrement: true }),
@@ -26,12 +23,12 @@ function createTestDb() {
 	return db;
 }
 
-describe("e2e: bun-sqlite batch middleware", () => {
+describe("e2e: bun-sqlite middleware", () => {
 	test("select returns correctly typed rows", () => {
 		const db = createTestDb();
 		db.insert(users).values({ name: "Alice" }).run();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('flag', 'on') ON CONFLICT(key) DO UPDATE SET value = 'on'`,
 			],
@@ -44,7 +41,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 	test("before queries execute inside the transaction", () => {
 		const db = createTestDb();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('tenant', 'acme') ON CONFLICT(key) DO UPDATE SET value = 'acme'`,
 			],
@@ -59,7 +56,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 	test("after queries execute inside the transaction", () => {
 		const db = createTestDb();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			after: [
 				sql`INSERT INTO kv (key, value) VALUES ('done', 'yes') ON CONFLICT(key) DO UPDATE SET value = 'yes'`,
 			],
@@ -75,7 +72,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 		const db = createTestDb();
 		db.insert(users).values({ name: "Dave" }).run();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('pre', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
 			],
@@ -98,7 +95,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 		const db = createTestDb();
 		const tenant = "acme-corp";
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('tenant', ${tenant}) ON CONFLICT(key) DO UPDATE SET value = ${tenant}`,
 			],
@@ -113,7 +110,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 	test("insert returns correct result", () => {
 		const db = createTestDb();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('x', 'y') ON CONFLICT(key) DO UPDATE SET value = 'y'`,
 			],
@@ -132,7 +129,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 		const db = createTestDb();
 		db.insert(users).values({ name: "Grace" }).run();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('op', 'update') ON CONFLICT(key) DO UPDATE SET value = 'update'`,
 			],
@@ -148,7 +145,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 		const db = createTestDb();
 		db.insert(users).values({ name: "Heidi" }).run();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('op', 'delete') ON CONFLICT(key) DO UPDATE SET value = 'delete'`,
 			],
@@ -164,7 +161,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 		const db = createTestDb();
 		let count = 0;
 
-		const wrapped = withBatchMiddleware(db, () => {
+		const wrapped = withMiddleware(db, () => {
 			count++;
 			return {
 				before: [
@@ -185,7 +182,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 	test("user transaction: before/after run at boundaries", () => {
 		const db = createTestDb();
 
-		const wrapped = withBatchMiddleware(db, () => ({
+		const wrapped = withMiddleware(db, () => ({
 			before: [
 				sql`INSERT INTO kv (key, value) VALUES ('phase', 'before') ON CONFLICT(key) DO UPDATE SET value = 'before'`,
 			],
@@ -206,7 +203,7 @@ describe("e2e: bun-sqlite batch middleware", () => {
 
 	test("wrapped db preserves $client", () => {
 		const db = createTestDb();
-		const wrapped = withBatchMiddleware(db, () => ({}));
+		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.$client).toBeDefined();
 	});
 });
