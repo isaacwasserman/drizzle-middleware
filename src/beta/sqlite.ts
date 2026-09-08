@@ -29,3 +29,8 @@ export function withMiddleware(db: any, middleware: any): any {
 		schema,
 	]);
 }
+
+export {
+	withBatchMiddleware,
+	type BatchMiddleware,
+} from "./sqlite-batch.js";
