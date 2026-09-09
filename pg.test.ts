@@ -832,6 +832,106 @@ describe("withMiddleware (pg)", () => {
 		expect(log).not.toContain("tx:begin");
 	});
 
+	// -------------------------------------------------------------------
+	// Driver-specific transaction subclasses
+	// -------------------------------------------------------------------
+
+	function mockPostgresJsTxDb(log: Log) {
+		const {
+			PostgresJsTransaction,
+		} = require("drizzle-orm-beta/postgres-js/session");
+		return new PostgresJsTransaction(
+			mockDialect,
+			createMockSession(log),
+			undefined,
+			{},
+			0,
+		);
+	}
+
+	test("PostgresJsTransaction: detected as transaction input", () => {
+		const log: Log = [];
+		const txDb = mockPostgresJsTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+		expect(wrapped).not.toBe(txDb);
+	});
+
+	test("PostgresJsTransaction: before + inner execute separately", async () => {
+		const log: Log = [];
+		const txDb = mockPostgresJsTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l: string) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(2);
+		const beforeIdx = log.findIndex(
+			(l: string) => l.startsWith("execute:") && l.includes("set_config"),
+		);
+		const innerIdx = log.findIndex((l: string) => l === "execute:SELECT 1");
+		expect(beforeIdx).toBeLessThan(innerIdx);
+	});
+
+	test("PostgresJsTransaction: before + inner + after, correct order", async () => {
+		const log: Log = [];
+		const txDb = mockPostgresJsTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('role', 'app', true)`],
+			after: [sql`SELECT set_config('role', '', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT users" });
+		await prepared.execute();
+
+		const execEntries = log.filter((l: string) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(3);
+		const beforeIdx = log.findIndex(
+			(l: string) => l.startsWith("execute:") && l.includes("'app'"),
+		);
+		const innerIdx = log.findIndex(
+			(l: string) => l.startsWith("execute:") && l.includes("SELECT users"),
+		);
+		const afterIdx = log.findIndex(
+			(l: string) => l.startsWith("execute:") && l.includes("''"),
+		);
+		expect(beforeIdx).toBeLessThan(innerIdx);
+		expect(innerIdx).toBeLessThan(afterIdx);
+	});
+
+	test("PostgresJsTransaction: no explicit tx opened (no tx:begin)", async () => {
+		const log: Log = [];
+		const txDb = mockPostgresJsTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		await prepared.execute();
+
+		expect(log).not.toContain("tx:begin");
+	});
+
+	test("PostgresJsTransaction: relational query also works", async () => {
+		const log: Log = [];
+		const txDb = mockPostgresJsTxDb(log);
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('a', 'x', true)`],
+		}));
+
+		const prepared = wrapped.session.prepareRelationalQuery({
+			sql: "SELECT rel",
+		});
+		await prepared.execute();
+
+		const execEntries = log.filter((l: string) => l.startsWith("execute:"));
+		expect(execEntries.length).toBe(2);
+	});
+
 	test("covers every PG session in drizzle-orm-beta", () => {
 		const sessionKinds = new Set<string>();
 		for (const dir of readdirSync("node_modules/drizzle-orm-beta", {
