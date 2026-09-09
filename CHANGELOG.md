@@ -1,5 +1,17 @@
 # drizzle-middleware
 
+## 0.2.0
+
+### Minor Changes
+
+- 635ef90: Consolidate the single-round-trip middleware API around the Postgres and SQLite entry points.
+- b996d8a: Support transaction objects as input to withMiddleware. Before/after middleware queries execute separately from the inner query so the inner query stays within the transaction's prepared statement path.
+
+### Patch Changes
+
+- 13f9b67: Fix PostgresJsTransaction constructor argument order. This subclass swaps schema and relations parameters compared to the base PgAsyncTransaction, which broke middleware wrapping for postgres.js transaction objects.
+- 99ca737: Fix customResultMapper not being applied for relational queries via prepareRelationalQuery, where the mapper argument position differs from other session methods.
+
 ## 0.1.0
 
 ### Minor Changes
