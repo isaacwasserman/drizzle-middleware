@@ -486,6 +486,28 @@ describe("withMiddleware (pg)", () => {
 		expect(result).toEqual([{ mapped: true, id: 1 }]);
 	});
 
+	test("customResultMapper is applied for relational queries (prepareRelationalQuery)", async () => {
+		const log: Log = [];
+		const db = mockDb(log);
+
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT 1`],
+		}));
+
+		const mapper = (rows: unknown[]) =>
+			rows.map((r: any) => ({ mapped: true, ...r }));
+
+		const prepared = wrapped.session.prepareRelationalQuery(
+			{ sql: "SELECT rel" },
+			undefined, // fields
+			undefined, // name
+			mapper, // customResultMapper — capturedArgs[3]
+		);
+		const result = await prepared.execute();
+
+		expect(result).toEqual([{ mapped: true, id: 1 }]);
+	});
+
 	test("result is returned unmodified when no fields/mapper", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
