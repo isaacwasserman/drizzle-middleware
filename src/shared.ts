@@ -82,9 +82,13 @@ export function mapExtractedResult(
 	joinsNotNullableMap: Record<string, boolean> | undefined,
 ): any {
 	const fields = capturedArgs[1] as any[] | undefined;
-	const customResultMapper = capturedArgs[4] as
-		| ((...args: any[]) => any)
-		| undefined;
+	let customResultMapper: ((...args: unknown[]) => unknown) | undefined;
+	for (let i = capturedArgs.length - 1; i >= 2; i--) {
+		if (typeof capturedArgs[i] === "function") {
+			customResultMapper = capturedArgs[i] as (...args: unknown[]) => unknown;
+			break;
+		}
+	}
 
 	if (!fields && !customResultMapper) return extracted;
 
