@@ -1,8 +1,14 @@
 import { entityKind } from "drizzle-orm-beta";
 import type { BaseSQLiteDatabase } from "drizzle-orm-beta/sqlite-core";
-import { type Middleware, buildWrappedDb, executeBatch } from "./shared.js";
+import {
+	type Middleware,
+	buildWrappedDb,
+	executeBatch,
+	executeBatchTransaction,
+} from "./shared.js";
 
 export type { Middleware };
+export { executeBatchTransaction };
 
 const UNSUPPORTED_DRIVERS = new Set([
 	"SQLiteRemoteSession",

@@ -1,8 +1,14 @@
 import { entityKind } from "drizzle-orm-beta";
 import type { PgAsyncDatabase } from "drizzle-orm-beta/pg-core";
-import { type Middleware, buildWrappedDb, executeBatch } from "./shared.js";
+import {
+	type Middleware,
+	buildWrappedDb,
+	executeBatch,
+	executeBatchTransaction,
+} from "./shared.js";
 
 export type { Middleware };
+export { executeBatchTransaction };
 
 const UNSUPPORTED_DRIVERS = new Set(["XataHttpSession", "PgRemoteSession"]);
 
