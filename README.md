@@ -102,15 +102,64 @@ const db = withMiddleware(baseDb, () => ({
 db.select().from(users).all();
 ```
 
+## Batched transactions
+
+The same machinery that lets middleware run in one round trip is also exported
+directly as `executeBatchTransaction`. It takes an array of Drizzle queries and runs
+them in a single batch, sequentially, then returns each query's result as a
+tuple in the same order:
+
+```ts
+import { executeBatchTransaction } from "drizzle-middleware";
+// or: import { executeBatchTransaction } from "drizzle-middleware/pg";
+
+const [inserted, users] = await executeBatchTransaction([
+  db.insert(users).values({ name: "Alice" }).returning(),
+  db.select().from(users),
+]);
+```
+
+Pass the queries built from your normal database instance — do not `await` them
+first. Each query keeps its own type, so the returned tuple is fully typed. The
+queries must come from the same database instance.
+
+Like the middleware, the queries are compiled with parameters inlined and sent
+through the driver's native batch mechanism (one Simple Query message for
+TCP drivers, the batch API for HTTP drivers). For sync SQLite (`bun:sqlite`)
+there is no round trip to collapse, so the queries run atomically inside one
+native transaction instead.
+
+If the queries come from a `withMiddleware`-wrapped db, the middleware is
+honored: every layer's `before`/`after` runs once around the whole batch (never
+bypassed). This is the same envelope the middleware itself runs through.
+
+### Composing middleware
+
+`withMiddleware` can wrap an already-wrapped db. The layers compose as an onion:
+each `before` runs outermost-first, each `after` innermost-first, and the whole
+stack still executes in a single round trip.
+
+```ts
+const rls = withMiddleware(baseDb, () => ({
+  before: [sql`SELECT set_config('app.tenant', ${tenantId}, true)`],
+}));
+const audited = withMiddleware(rls, () => ({
+  after: [sql`INSERT INTO audit (action) VALUES ('read')`],
+}));
+
+// One round trip: set_config → user query → audit insert.
+await audited.select().from(users);
+```
+
 ## API Reference
 
 ### Subpaths
 
 | Subpath | Exports |
 |---|---|
-| `drizzle-middleware/pg` | `withMiddleware`, `Middleware` |
-| `drizzle-middleware/sqlite` | `withMiddleware`, `Middleware` |
-| `drizzle-middleware` | `withPgMiddleware`, `PgMiddleware`, `withSqliteMiddleware`, `SqliteMiddleware` |
+| `drizzle-middleware/pg` | `withMiddleware`, `Middleware`, `executeBatchTransaction` |
+| `drizzle-middleware/sqlite` | `withMiddleware`, `Middleware`, `executeBatchTransaction` |
+| `drizzle-middleware` | `withPgMiddleware`, `PgMiddleware`, `withSqliteMiddleware`, `SqliteMiddleware`, `executeBatchTransaction` |
 
 ### Signature
 
@@ -121,6 +170,10 @@ type Middleware = () => {
 };
 
 function withMiddleware<TDb>(db: TDb, middleware: Middleware): TDb;
+
+function executeBatchTransaction<T extends readonly PromiseLike<unknown>[]>(
+  queries: readonly [...T],
+): Promise<{ [K in keyof T]: Awaited<T[K]> }>;
 ```
 
 ## How It Works

@@ -551,13 +551,19 @@ describe("withMiddleware (pg)", () => {
 			static [entityKind] = "NodePgSession";
 
 			client = {
-				async query(sqlStr: string) {
+				// Real node-postgres accepts either a string or a
+				// `{ text, rowMode }` config object; mirror both.
+				async query(input: string | { text: string; rowMode?: string }) {
+					const sqlStr = typeof input === "string" ? input : input.text;
+					const arrayMode =
+						typeof input === "object" && input.rowMode === "array";
 					log.push(`client.query:${sqlStr}`);
 					const stmtCount = (sqlStr.match(/;\n/g) || []).length + 1;
+					const row = () => (arrayMode ? [1] : { id: 1 });
 					if (stmtCount > 1) {
-						return Array.from({ length: stmtCount }, (_, i) => [{ id: i + 1 }]);
+						return Array.from({ length: stmtCount }, () => [row()]);
 					}
-					return [{ id: 1 }];
+					return [row()];
 				},
 			};
 

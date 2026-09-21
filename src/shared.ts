@@ -76,6 +76,17 @@ function extractInnerResult(rawResult: any, beforeCount: number): any {
 		: rawResult;
 }
 
+// A custom result mapper (relational RQBv2 / some raw queries) reads rows by
+// column name, so those queries must receive object-mode rows. Field-based
+// queries instead need positional array rows to survive duplicate column labels
+// (e.g. a join where both tables expose an `id`).
+function hasCustomResultMapper(capturedArgs: unknown[]): boolean {
+	for (let i = capturedArgs.length - 1; i >= 2; i--) {
+		if (typeof capturedArgs[i] === "function") return true;
+	}
+	return false;
+}
+
 export function mapExtractedResult(
 	extracted: any,
 	capturedArgs: unknown[],
@@ -129,25 +140,100 @@ export interface MiddlewareConfig {
 	makeDbArgs: (d: any, dialect: any, session: any, schemaArg: any) => any[];
 	isSync?: boolean;
 	isTransactionInput?: boolean;
-	execBatch?: (statements: string[], session: any) => any;
+	execBatch?: (statements: string[], session: any, arrayMode?: boolean) => any;
 }
 
-const RAW_QUERY_CONFIG = { arrayMode: false, fullResults: true };
+// A wrapped session advertises its middleware layer under this symbol. That is
+// how an outer middleware layer and `executeBatchTransaction` discover the full
+// stack and honor every layer's before/after instead of silently bypassing one.
+const MW_STATE: unique symbol = Symbol.for("drizzle-middleware.state");
+
+// A wrapped prepared query advertises the underlying real prepared query here,
+// so the fast path can run it directly without re-invoking any middleware.
+const RAW_PREPARED: unique symbol = Symbol.for(
+	"drizzle-middleware.rawPrepared",
+);
+
+type MiddlewareState = {
+	middleware: Middleware;
+	config: MiddlewareConfig;
+	dialect: any;
+	baseSession: InternalSession;
+};
+
+// One capturable query: its SQL AST plus everything needed to map its result.
+type EnvelopeItem = {
+	sqlObj: SQL;
+	capturedArgs: unknown[];
+	joinsNotNullableMap: Record<string, boolean> | undefined;
+};
+
+// Walk a session's middleware chain from outermost to innermost.
+function walkStates(session: any): MiddlewareState[] {
+	const states: MiddlewareState[] = [];
+	let s: any = session;
+	while (s?.[MW_STATE]) {
+		const state = s[MW_STATE] as MiddlewareState;
+		states.push(state);
+		s = state.baseSession;
+	}
+	return states;
+}
+
+// Peel every middleware proxy off a session to reach the real driver session,
+// so we can send the batch without re-triggering any layer's interception.
+function rawSession(session: any): InternalSession {
+	let s: any = session;
+	while (s?.[MW_STATE]) s = (s[MW_STATE] as MiddlewareState).baseSession;
+	return s as InternalSession;
+}
+
+// Invoke every layer once and combine: before runs outermost-first, after runs
+// innermost-first (onion order), so the stack composes like nested wrappers.
+function stackBeforeAfter(states: MiddlewareState[]): {
+	before: SQL[];
+	after: SQL[];
+} {
+	const batches = states.map((s) => s.middleware());
+	const before: SQL[] = [];
+	const after: SQL[] = [];
+	for (const b of batches) if (b.before) before.push(...b.before);
+	for (let i = batches.length - 1; i >= 0; i--) {
+		const a = batches[i]?.after;
+		if (a) after.push(...a);
+	}
+	return { before, after };
+}
 
 // Drizzle exposes the native driver on `session.client` (or `httpClient` for
 // Netlify). Prefer capabilities over a growing list of Drizzle session names.
-export function executeBatch(statements: string[], session: any): any {
+//
+// `arrayMode` requests positional array rows (each driver's own array-mode API,
+// mirrored from Drizzle's sessions). Callers use it for field-based queries so
+// duplicate column labels survive; object rows are kept for custom mappers.
+export function executeBatch(
+	statements: string[],
+	session: any,
+	arrayMode = false,
+): any {
 	const client = session.client;
 	const joined = statements.join(";\n");
 
 	if (client?.batch) {
+		// libSQL returns array-like rows already, so no array-mode flag is needed.
 		const queries = client.prepare
 			? statements.map((statement) => client.prepare(statement))
 			: statements.map((sql) => ({ sql, args: [] }));
 		return client.batch(queries);
 	}
-	if (client?.exec) return client.exec(joined);
-	if (client?.unsafe) return client.unsafe(joined);
+	if (client?.exec)
+		return client.exec(joined, arrayMode ? { rowMode: "array" } : undefined);
+	if (client?.unsafe) {
+		const query = client.unsafe(joined);
+		return arrayMode && typeof query?.values === "function"
+			? query.values()
+			: query;
+	}
 
 	const httpClient =
 		session.httpClient ??
@@ -158,12 +244,17 @@ export function executeBatch(statements: string[], session: any): any {
 		const query = httpClient.query ?? client?.query ?? client;
 		if (typeof query === "function") {
 			return httpClient.transaction(
-				statements.map((sql) => query(sql, [], RAW_QUERY_CONFIG)),
+				statements.map((sql) =>
+					query(sql, [], { arrayMode, fullResults: true }),
+				),
 			);
 		}
 	}
 
-	if (client?.query) return client.query(joined);
+	if (client?.query)
+		return arrayMode
+			? client.query({ text: joined, rowMode: "array" })
+			: client.query(joined);
 	if (client?.transaction && client?.prepare) {
 		return client.transaction(async () => {
 			const results = [];
@@ -172,6 +263,31 @@ export function executeBatch(statements: string[], session: any): any {
 			return results;
 		})();
 	}
+}
+
+// Send inlined statements in one round trip: try the driver's native batch
+// mechanism, and fall back to a single multi-statement prepared query when the
+// driver exposes none. Shared by the middleware and `executeBatchTransaction`.
+function dispatchBatch(
+	parts: string[],
+	session: InternalSession,
+	rawPrepareArgs: any[],
+	execBatch:
+		| ((statements: string[], session: any, arrayMode?: boolean) => any)
+		| undefined,
+	storedToken: unknown,
+	arrayMode: boolean,
+): any {
+	let rawResult = execBatch?.(parts, session, arrayMode);
+	if (rawResult === undefined) {
+		const rawPrepared = session.prepareQuery(
+			{ sql: parts.join(";\n"), params: [] },
+			...rawPrepareArgs,
+		);
+		if (storedToken && rawPrepared.setToken) rawPrepared.setToken(storedToken);
+		rawResult = rawPrepared.execute();
+	}
+	return rawResult;
 }
 
 // -----------------------------------------------------------------------
@@ -191,6 +307,25 @@ function execSyncSideEffect(
 	prepared.run?.() ?? (prepared as any).execute?.()?.sync?.();
 }
 
+// Sync envelope: run before, the items, and after individually inside one
+// native transaction (sync drivers cannot return per-statement batch results).
+function runEnvelopeSync(
+	before: SQL[],
+	items: ((txSession: InternalSession) => any)[],
+	after: SQL[],
+	session: InternalSession,
+	dialect: any,
+	config: MiddlewareConfig,
+): any[] {
+	return session.transaction((tx) => {
+		const txSession = (tx as any).session as InternalSession;
+		for (const s of before) execSyncSideEffect(s, dialect, txSession, config);
+		const results = items.map((run) => run(txSession));
+		for (const s of after) execSyncSideEffect(s, dialect, txSession, config);
+		return results;
+	});
+}
+
 function execSync(
 	before: SQL[],
 	after: SQL[],
@@ -204,22 +339,24 @@ function execSync(
 	prop: string,
 	execArgs: any[],
 ) {
-	return session.transaction((tx) => {
-		const txSession = (tx as any).session as InternalSession;
-
-		for (const s of before) execSyncSideEffect(s, dialect, txSession, config);
-
-		const txPrepared = (txSession as any)[prepareMethod](...capturedArgs);
-		if (storedToken && txPrepared.setToken) txPrepared.setToken(storedToken);
-		if (joinsNotNullableMap)
-			txPrepared.joinsNotNullableMap = joinsNotNullableMap;
-
-		const result = txPrepared[prop](...execArgs);
-
-		for (const s of after) execSyncSideEffect(s, dialect, txSession, config);
-
-		return result;
-	});
+	const results = runEnvelopeSync(
+		before,
+		[
+			(txSession) => {
+				const txPrepared = (txSession as any)[prepareMethod](...capturedArgs);
+				if (storedToken && txPrepared.setToken)
+					txPrepared.setToken(storedToken);
+				if (joinsNotNullableMap)
+					txPrepared.joinsNotNullableMap = joinsNotNullableMap;
+				return txPrepared[prop](...execArgs);
+			},
+		],
+		after,
+		rawSession(session),
+		dialect,
+		config,
+	);
+	return results[0];
 }
 
 // -----------------------------------------------------------------------
@@ -250,6 +387,56 @@ function execSyncInTransaction(
 // using the driver's preferred mechanism (Simple Query, HTTP batch, etc).
 // -----------------------------------------------------------------------
 
+// Async envelope: inline before + every item + after into one payload, send it
+// in a single round trip, then map each item's slice of the result back.
+function runEnvelopeAsync(
+	before: SQL[],
+	items: EnvelopeItem[],
+	after: SQL[],
+	session: InternalSession,
+	dialect: any,
+	rawPrepareArgs: any[],
+	execBatch:
+		| ((statements: string[], session: any, arrayMode?: boolean) => any)
+		| undefined,
+	storedToken: unknown,
+): Promise<any[]> {
+	const parts: string[] = [];
+	for (const s of before) parts.push(inlineSql(s, dialect));
+	for (const it of items) parts.push(inlineSql(it.sqlObj, dialect));
+	for (const s of after) parts.push(inlineSql(s, dialect));
+
+	// Request positional array rows only when every item is field-based (has a
+	// fields list and no custom mapper). Array rows make duplicate column labels
+	// safe; a relational mapper needs object rows, and a raw query (no fields)
+	// must keep the driver's native object shape.
+	const arrayMode =
+		items.length > 0 &&
+		items.every(
+			(it) =>
+				Array.isArray(it.capturedArgs[1]) &&
+				!hasCustomResultMapper(it.capturedArgs),
+		);
+
+	const rawResult = dispatchBatch(
+		parts,
+		session,
+		rawPrepareArgs,
+		execBatch,
+		storedToken,
+		arrayMode,
+	);
+	return Promise.resolve(rawResult).then((result) =>
+		items.map((it, i) =>
+			mapExtractedResult(
+				extractInnerResult(result, before.length + i),
+				it.capturedArgs,
+				it.joinsNotNullableMap,
+			),
+		),
+	);
+}
+
 function execAsync(
 	before: SQL[],
 	after: SQL[],
@@ -267,24 +454,16 @@ function execAsync(
 		? resolvePlaceholders(capturedSqlObj, placeholderValues)
 		: capturedSqlObj;
 
-	const parts: string[] = [];
-	for (const s of before) parts.push(inlineSql(s, dialect));
-	parts.push(inlineSql(resolvedSql, dialect));
-	for (const s of after) parts.push(inlineSql(s, dialect));
-
-	let rawResult = config.execBatch?.(parts, session);
-	if (rawResult === undefined) {
-		const rawPrepared = session.prepareQuery(
-			{ sql: parts.join(";\n"), params: [] },
-			...config.rawPrepareArgs(),
-		);
-		if (storedToken && rawPrepared.setToken) rawPrepared.setToken(storedToken);
-		rawResult = rawPrepared.execute();
-	}
-	return Promise.resolve(rawResult).then((result) => {
-		const extracted = extractInnerResult(result, before.length);
-		return mapExtractedResult(extracted, capturedArgs, joinsNotNullableMap);
-	});
+	return runEnvelopeAsync(
+		before,
+		[{ sqlObj: resolvedSql, capturedArgs, joinsNotNullableMap }],
+		after,
+		rawSession(session),
+		dialect,
+		config.rawPrepareArgs(),
+		config.execBatch,
+		storedToken,
+	).then((results) => results[0]);
 }
 
 // -----------------------------------------------------------------------
@@ -343,18 +522,27 @@ function wrapPreparedQuery(
 
 	return new Proxy(prepared, {
 		get(target, prop, receiver) {
+			// Expose the innermost real prepared query so an outer layer (or the
+			// fast path) can run it without re-triggering middleware.
+			if (prop === RAW_PREPARED) return (target as any)[RAW_PREPARED] ?? target;
+
 			if (
 				typeof prop === "string" &&
 				EXEC_METHODS.has(prop) &&
 				typeof (target as any)[prop] === "function"
 			) {
 				return (...execArgs: any[]) => {
-					const batch = middleware();
-					const before = batch.before ?? [];
-					const after = batch.after ?? [];
+					// Collect this layer plus every inner layer, so a stack of
+					// wrapped dbs composes instead of the outermost one winning.
+					const states: MiddlewareState[] = [
+						{ middleware, config, dialect, baseSession: session },
+						...walkStates(session),
+					];
+					const { before, after } = stackBeforeAfter(states);
 
 					if (before.length === 0 && after.length === 0) {
-						return (target as any)[prop](...execArgs);
+						const raw = (target as any)[RAW_PREPARED] ?? target;
+						return raw[prop](...execArgs);
 					}
 
 					if (config.isTransactionInput) {
@@ -479,8 +667,18 @@ export function wrapSession(
 ): InternalSession {
 	const { dialect } = dialectCapture;
 
+	const state: MiddlewareState = {
+		middleware,
+		config,
+		dialect,
+		baseSession: session,
+	};
+
 	return new Proxy(session, {
 		get(target, prop, receiver) {
+			// Advertise this layer so outer layers and executeBatchTransaction can
+			// walk the full middleware stack.
+			if (prop === MW_STATE) return state;
 			if (prop === "prepareQuery") {
 				return (...args: any[]) => {
 					const sqlObj =
@@ -530,6 +728,167 @@ export function wrapSession(
 			return Reflect.get(target, prop, receiver);
 		},
 	});
+}
+
+// -----------------------------------------------------------------------
+// executeBatchTransaction — run an array of Drizzle queries in one round trip.
+//
+// Runs through the same envelope as the middleware: each query is compiled to a
+// parameter-inlined SQL string, the strings are sent in a single batch, and
+// each query's slice of the result is mapped back with the query's own
+// fields / customResultMapper. When the db is middleware-wrapped, every layer's
+// before/after is applied once around the batch — the middleware is honored,
+// never bypassed.
+// -----------------------------------------------------------------------
+
+// A Drizzle query builder is a thenable (QueryPromise). We only need the
+// internal `_prepare` hook plus the writable `session` / `dialect` fields.
+type BatchQuery = PromiseLike<unknown> & {
+	session: InternalSession;
+	dialect: any;
+	_prepare: (...args: any[]) => unknown;
+	execute: (...args: any[]) => any;
+};
+
+// Drive a query through `_prepare` with the session and dialect swapped for
+// capturing stand-ins, so we grab the compiled SQL AST and the exact args
+// Drizzle would pass to `prepareQuery` — without executing anything.
+function collectQuery(
+	query: BatchQuery,
+	dialectCapture: ReturnType<typeof wrapDialectCapture>,
+): EnvelopeItem {
+	const origSession = query.session;
+	const origDialect = query.dialect;
+
+	let captured: { args: unknown[]; stub: any } | undefined;
+	const makeStub = (args: unknown[]) => {
+		const stub: any = {
+			joinsNotNullableMap: undefined as Record<string, boolean> | undefined,
+			setToken: () => stub,
+		};
+		captured = { args, stub };
+		return stub;
+	};
+
+	const collectorSession = new Proxy(origSession, {
+		get(target, prop, receiver) {
+			if (
+				prop === "prepareQuery" ||
+				prop === "prepareRelationalQuery" ||
+				prop === "prepareOneTimeRelationalQuery"
+			) {
+				return (...args: unknown[]) => makeStub(args);
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+
+	query.session = collectorSession;
+	query.dialect = dialectCapture.dialect;
+	dialectCapture.lastCapturedSql = undefined;
+	try {
+		query._prepare();
+	} finally {
+		query.session = origSession;
+		query.dialect = origDialect;
+	}
+
+	if (!captured || !dialectCapture.lastCapturedSql) {
+		throw new Error(
+			"executeBatchTransaction: could not capture a query. Pass Drizzle query builders (e.g. db.select()... / db.insert()...).",
+		);
+	}
+
+	return {
+		sqlObj: dialectCapture.lastCapturedSql,
+		capturedArgs: captured.args,
+		joinsNotNullableMap: captured.stub.joinsNotNullableMap,
+	};
+}
+
+export function executeBatchTransaction<
+	const T extends readonly PromiseLike<unknown>[],
+>(
+	queries: readonly [...T],
+): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+	type Results = { -readonly [K in keyof T]: Awaited<T[K]> };
+
+	if (queries.length === 0) return Promise.resolve([] as unknown as Results);
+
+	const list = queries as unknown as BatchQuery[];
+	const first = list[0] as BatchQuery;
+	const realDialect = first.dialect;
+	const session = first.session;
+
+	// Every query is batched onto the first query's session, so they must all
+	// come from the same database instance. Mixing instances would silently run
+	// some queries against the wrong connection, so reject it up front.
+	for (let i = 1; i < list.length; i++) {
+		if (list[i]?.session !== session || list[i]?.dialect !== realDialect) {
+			throw new Error(
+				`executeBatchTransaction: all queries must come from the same database instance (query at index ${i} does not match the first).`,
+			);
+		}
+	}
+
+	const kind: string | undefined = realDialect?.constructor?.[entityKind];
+
+	// If the db is middleware-wrapped, gather the whole stack and apply each
+	// layer's before/after once around the batch. Empty when unwrapped.
+	const states = walkStates(session);
+	const outer = states[0];
+	const dialect = outer?.dialect ?? realDialect;
+	const sendSession = rawSession(session);
+	const { before, after } = stackBeforeAfter(states);
+
+	// Sync SQLite runs in-process, so there is no round trip to collapse.
+	// Run before, the queries, and after atomically in one native transaction.
+	if (kind === "SQLiteSyncDialect") {
+		const config =
+			outer?.config ??
+			({ txPrepareArgs: () => [undefined, "run", false] } as MiddlewareConfig);
+		// `execute()` is async, but its body runs the query synchronously before
+		// resolving — so every query still runs in-order inside the transaction.
+		// We await the resolved wrappers afterwards.
+		const pending = runEnvelopeSync(
+			before,
+			list.map((query) => (txSession: InternalSession) => {
+				const origSession = query.session;
+				query.session = txSession;
+				try {
+					return query.execute();
+				} finally {
+					query.session = origSession;
+				}
+			}),
+			after,
+			sendSession,
+			dialect,
+			config,
+		);
+		return Promise.all(pending) as Promise<Results>;
+	}
+
+	const dialectCapture = wrapDialectCapture(realDialect);
+	const collected = list.map((query) => collectQuery(query, dialectCapture));
+
+	const rawPrepareArgs = outer
+		? outer.config.rawPrepareArgs()
+		: kind === "SQLiteAsyncDialect"
+			? [undefined, "all", false]
+			: [undefined, undefined, false];
+	const execBatch = outer ? outer.config.execBatch : executeBatch;
+
+	return runEnvelopeAsync(
+		before,
+		collected,
+		after,
+		sendSession,
+		dialect,
+		rawPrepareArgs,
+		execBatch,
+		undefined,
+	) as Promise<Results>;
 }
 
 export function buildWrappedDb(

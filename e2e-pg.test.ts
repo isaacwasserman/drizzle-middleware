@@ -15,6 +15,11 @@ const kvStore = pgTable("kv", {
 	value: text("value").notNull(),
 });
 
+const orders = pgTable("orders", {
+	id: serial("id").primaryKey(),
+	userId: integer("user_id").notNull(),
+});
+
 async function createTestDb() {
 	const client = new PGlite();
 	const db = drizzle({ client });
@@ -236,5 +241,96 @@ describe("e2e: pglite middleware", () => {
 		const db = await createTestDb();
 		const wrapped = withMiddleware(db, () => ({}));
 		expect(wrapped.$client).toBeInstanceOf(PGlite);
+	});
+
+	test("join with duplicate column labels maps correctly through the batch", async () => {
+		const db = await createTestDb();
+		await db.execute(
+			sql`CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL)`,
+		);
+		await db.insert(users).values({ name: "Nia" });
+		await db.insert(orders).values({ userId: 1 });
+
+		// Both tables expose an `id`; the batched multi-statement result must come
+		// back as positional array rows so neither `id` is dropped.
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT set_config('app.x', '1', true)`],
+		}));
+
+		const rows = await wrapped
+			.select()
+			.from(users)
+			.innerJoin(orders, eq(orders.userId, users.id));
+
+		expect(rows).toEqual([
+			{
+				users: { id: 1, name: "Nia" },
+				orders: { id: 1, userId: 1 },
+			},
+		]);
+	});
+
+	test("executeBatchTransaction: join with duplicate column labels", async () => {
+		const db = await createTestDb();
+		await db.execute(
+			sql`CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL)`,
+		);
+		await db.insert(users).values({ name: "Omar" });
+		await db.insert(orders).values({ userId: 1 });
+
+		const { executeBatchTransaction } = await import("./src/pg.ts");
+		const [joined] = await executeBatchTransaction([
+			db.select().from(users).innerJoin(orders, eq(orders.userId, users.id)),
+		]);
+
+		expect(joined).toEqual([
+			{ users: { id: 1, name: "Omar" }, orders: { id: 1, userId: 1 } },
+		]);
+	});
+
+	test("composition: nested middleware applies both layers in one round trip", async () => {
+		const db = await createTestDb();
+		await db.insert(users).values({ name: "Mia" });
+
+		let innerCalls = 0;
+		let outerCalls = 0;
+
+		const inner = withMiddleware(db, () => {
+			innerCalls++;
+			return {
+				before: [sql`SELECT set_config('app.inner', 'i', true)`],
+				after: [
+					sql`INSERT INTO kv (key, value) VALUES ('inner_after', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
+				],
+			};
+		});
+		const outer = withMiddleware(inner, () => {
+			outerCalls++;
+			return {
+				before: [sql`SELECT set_config('app.outer', 'o', true)`],
+				after: [
+					sql`INSERT INTO kv (key, value) VALUES ('outer_after', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
+				],
+			};
+		});
+
+		// Both before-layers are visible to the main query (neither is bypassed).
+		const rows = await outer
+			.select({
+				name: users.name,
+				ctx: sql<string>`current_setting('app.inner') || '/' || current_setting('app.outer')`,
+			})
+			.from(users);
+		expect(rows).toEqual([{ name: "Mia", ctx: "i/o" }]);
+
+		// Each factory runs exactly once for the single query.
+		expect(innerCalls).toBe(1);
+		expect(outerCalls).toBe(1);
+
+		// Both after-layers ran too.
+		expect(await db.select().from(kvStore).orderBy(kvStore.key)).toEqual([
+			{ key: "inner_after", value: "1" },
+			{ key: "outer_after", value: "1" },
+		]);
 	});
 });
