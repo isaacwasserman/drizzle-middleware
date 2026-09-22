@@ -76,17 +76,6 @@ function extractInnerResult(rawResult: any, beforeCount: number): any {
 		: rawResult;
 }
 
-// A custom result mapper (relational RQBv2 / some raw queries) reads rows by
-// column name, so those queries must receive object-mode rows. Field-based
-// queries instead need positional array rows to survive duplicate column labels
-// (e.g. a join where both tables expose an `id`).
-function hasCustomResultMapper(capturedArgs: unknown[]): boolean {
-	for (let i = capturedArgs.length - 1; i >= 2; i--) {
-		if (typeof capturedArgs[i] === "function") return true;
-	}
-	return false;
-}
-
 export function mapExtractedResult(
 	extracted: any,
 	capturedArgs: unknown[],
@@ -165,8 +154,39 @@ type MiddlewareState = {
 type EnvelopeItem = {
 	sqlObj: SQL;
 	capturedArgs: unknown[];
+	rowMode: "array" | "object";
 	joinsNotNullableMap: Record<string, boolean> | undefined;
 };
+
+function hasCustomResultMapper(capturedArgs: unknown[]): boolean {
+	for (let i = capturedArgs.length - 1; i >= 2; i--) {
+		if (typeof capturedArgs[i] === "function") return true;
+	}
+	return false;
+}
+
+// Drizzle supplies `isResponseInArrayMode` as the fourth `prepareQuery`
+// argument. Honor it for queries whose fields or custom mapper consume mapped
+// rows. This is deliberately not inferred solely from the presence of a custom
+// mapper: `$count()` and the legacy relational builder both use custom mappers
+// over positional rows, whereas `prepareRelationalQuery` mappers consume object
+// rows. Queries with neither fields nor a mapper preserve the driver's native
+// raw result, as Drizzle's own sessions do.
+function getRowMode(
+	prepareMethod: string,
+	capturedArgs: unknown[],
+): "array" | "object" {
+	if (
+		prepareMethod === "prepareRelationalQuery" ||
+		prepareMethod === "prepareOneTimeRelationalQuery"
+	) {
+		return "object";
+	}
+	if (capturedArgs[1] === undefined && !hasCustomResultMapper(capturedArgs)) {
+		return "object";
+	}
+	return capturedArgs[3] === true ? "array" : "object";
+}
 
 // Walk a session's middleware chain from outermost to innermost.
 function walkStates(session: any): MiddlewareState[] {
@@ -406,17 +426,17 @@ function runEnvelopeAsync(
 	for (const it of items) parts.push(inlineSql(it.sqlObj, dialect));
 	for (const s of after) parts.push(inlineSql(s, dialect));
 
-	// Request positional array rows only when every item is field-based (has a
-	// fields list and no custom mapper). Array rows make duplicate column labels
-	// safe; a relational mapper needs object rows, and a raw query (no fields)
-	// must keep the driver's native object shape.
-	const arrayMode =
-		items.length > 0 &&
-		items.every(
-			(it) =>
-				Array.isArray(it.capturedArgs[1]) &&
-				!hasCustomResultMapper(it.capturedArgs),
+	const rowModes = new Set(items.map((it) => it.rowMode));
+	if (rowModes.size > 1) {
+		throw new Error(
+			"executeBatchTransaction: cannot batch queries with mixed array- and object-mode results. Run them separately so Drizzle can preserve each query's result shape.",
 		);
+	}
+
+	// Positional rows preserve duplicate column labels and are also the shape
+	// declared by custom mappers such as `$count()`. Object mode is reserved for
+	// relational mappers, which use column names to reconstruct nested results.
+	const arrayMode = rowModes.has("array");
 
 	const rawResult = dispatchBatch(
 		parts,
@@ -442,6 +462,7 @@ function execAsync(
 	after: SQL[],
 	capturedSqlObj: SQL,
 	capturedArgs: unknown[],
+	prepareMethod: string,
 	session: InternalSession,
 	dialect: any,
 	config: MiddlewareConfig,
@@ -456,7 +477,14 @@ function execAsync(
 
 	return runEnvelopeAsync(
 		before,
-		[{ sqlObj: resolvedSql, capturedArgs, joinsNotNullableMap }],
+		[
+			{
+				sqlObj: resolvedSql,
+				capturedArgs,
+				rowMode: getRowMode(prepareMethod, capturedArgs),
+				joinsNotNullableMap,
+			},
+		],
 		after,
 		rawSession(session),
 		dialect,
@@ -591,6 +619,7 @@ function wrapPreparedQuery(
 						after,
 						capturedSqlObj,
 						capturedArgs,
+						prepareMethod,
 						session,
 						dialect,
 						config,
@@ -760,13 +789,15 @@ function collectQuery(
 	const origSession = query.session;
 	const origDialect = query.dialect;
 
-	let captured: { args: unknown[]; stub: any } | undefined;
-	const makeStub = (args: unknown[]) => {
+	let captured:
+		| { args: unknown[]; prepareMethod: string; stub: any }
+		| undefined;
+	const makeStub = (prepareMethod: string, args: unknown[]) => {
 		const stub: any = {
 			joinsNotNullableMap: undefined as Record<string, boolean> | undefined,
 			setToken: () => stub,
 		};
-		captured = { args, stub };
+		captured = { args, prepareMethod, stub };
 		return stub;
 	};
 
@@ -777,7 +808,7 @@ function collectQuery(
 				prop === "prepareRelationalQuery" ||
 				prop === "prepareOneTimeRelationalQuery"
 			) {
-				return (...args: unknown[]) => makeStub(args);
+				return (...args: unknown[]) => makeStub(prop as string, args);
 			}
 			return Reflect.get(target, prop, receiver);
 		},
@@ -802,6 +833,7 @@ function collectQuery(
 	return {
 		sqlObj: dialectCapture.lastCapturedSql,
 		capturedArgs: captured.args,
+		rowMode: getRowMode(captured.prepareMethod, captured.args),
 		joinsNotNullableMap: captured.stub.joinsNotNullableMap,
 	};
 }

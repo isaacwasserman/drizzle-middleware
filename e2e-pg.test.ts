@@ -47,6 +47,27 @@ describe("e2e: pglite middleware", () => {
 		expect(rows).toEqual([{ id: 1, name: "Alice" }]);
 	});
 
+	test("$count uses positional rows and still runs middleware", async () => {
+		const db = await createTestDb();
+		await db.insert(users).values([{ name: "Alice" }, { name: "Bob" }]);
+		let middlewareRuns = 0;
+
+		const wrapped = withMiddleware(db, () => {
+			middlewareRuns++;
+			return {
+				before: [
+					sql`INSERT INTO kv (key, value) VALUES ('count', 'ran') ON CONFLICT(key) DO UPDATE SET value = 'ran'`,
+				],
+			};
+		});
+
+		expect(await wrapped.$count(users)).toBe(2);
+		expect(middlewareRuns).toBe(1);
+		expect(await db.select().from(kvStore)).toEqual([
+			{ key: "count", value: "ran" },
+		]);
+	});
+
 	test("before queries execute atomically with the main query", async () => {
 		const db = await createTestDb();
 

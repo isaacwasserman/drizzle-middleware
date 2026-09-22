@@ -486,6 +486,83 @@ describe("withMiddleware (pg)", () => {
 		expect(result).toEqual([{ mapped: true, id: 1 }]);
 	});
 
+	test("custom positional mappers request postgres-js array mode", async () => {
+		const log: Log = [];
+		const session = createMockSession(log);
+		let valuesCalled = false;
+		session.client = {
+			unsafe: (_query: string) => {
+				const result = Promise.resolve([[], [["30"]]]);
+				return Object.assign(result, {
+					values: () => {
+						valuesCalled = true;
+						return result;
+					},
+				});
+			},
+		};
+		const db = new (PgAsyncDatabase as any)(
+			mockDialect,
+			session,
+			{},
+			undefined,
+		);
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT 1`],
+		}));
+
+		const count = await wrapped.session
+			.prepareQuery(
+				{ sql: "SELECT count(*) FROM users" },
+				undefined,
+				undefined,
+				true, // isResponseInArrayMode
+				(rows: unknown[][]) => Number(rows[0]?.[0] ?? 0),
+			)
+			.execute();
+
+		expect(count).toBe(30);
+		expect(valuesCalled).toBe(true);
+	});
+
+	test("unmapped queries preserve postgres-js native object results", async () => {
+		const log: Log = [];
+		const session = createMockSession(log);
+		let valuesCalled = false;
+		session.client = {
+			unsafe: (_query: string) => {
+				const result = Promise.resolve([[], [{ count: "30" }]]);
+				return Object.assign(result, {
+					values: () => {
+						valuesCalled = true;
+						return result;
+					},
+				});
+			},
+		};
+		const db = new (PgAsyncDatabase as any)(
+			mockDialect,
+			session,
+			{},
+			undefined,
+		);
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT 1`],
+		}));
+
+		const result = await wrapped.session
+			.prepareQuery(
+				{ sql: "SELECT count(*) FROM users" },
+				undefined,
+				undefined,
+				true, // ignored by Drizzle when there is no fields/mapper mapping step
+			)
+			.execute();
+
+		expect(result).toEqual([{ count: "30" }]);
+		expect(valuesCalled).toBe(false);
+	});
+
 	test("customResultMapper is applied for relational queries (prepareRelationalQuery)", async () => {
 		const log: Log = [];
 		const db = mockDb(log);
