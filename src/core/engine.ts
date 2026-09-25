@@ -8,6 +8,7 @@ import {
 	BatchError,
 	type Execution,
 	type Recorder,
+	type SendContext,
 } from "./driver.js";
 
 /**
@@ -48,6 +49,7 @@ export async function runRecordedBatch<TCall, TResult>(
 	spec: BatchDriverSpec<TCall, TResult>,
 	session: DrizzleSession,
 	executions: readonly Execution[],
+	context: SendContext,
 ): Promise<unknown[]> {
 	const pending: Pending<TCall, TResult>[] = [];
 	const outputs: Promise<unknown>[] = [];
@@ -110,6 +112,7 @@ export async function runRecordedBatch<TCall, TResult>(
 		results = await spec.send(
 			session,
 			pending.map((p) => p.call),
+			context,
 		);
 	} catch (error) {
 		const failed = error instanceof BatchError ? error.index : -1;

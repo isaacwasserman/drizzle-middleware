@@ -54,7 +54,7 @@ Strategies:
 
 - **Pipeline:** Parse/Bind/Execute for every statement, then one Sync. Postgres runs everything before the Sync as one implicit transaction. One round trip, with parameters.
 - **Pipelined transaction:** `BEGIN`, the statements, and `COMMIT` sent concurrently on one reserved connection. One round trip once the driver knows each query text (about one extra round trip for each new query text on a connection).
-- **Simple query + inline:** one multi-statement message. Values go through the strict encoder (section 6). One round trip.
+- **Pipelined transaction, inline:** like the pipelined transaction, with each statement's values inlined by the strict encoder (section 6), so no statement waits for its parameter types. Each statement is sent on its own (not as one multi-statement message), so each keeps its own result. One round trip.
 - **Batch API:** the driver's own atomic batch call, with parameters. One round trip.
 - **Local transaction:** a normal transaction. The database runs in-process, so there are no network round trips.
 - **Sequential:** a normal transaction with one call per statement. Only for drivers that have no one-round-trip mechanism.
@@ -66,14 +66,13 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 
 | Driver | Strategy | Verified |
 |---|---|---|
-| node-postgres | Pipeline | Yes (spike, real Postgres 16) |
+| node-postgres | Pipeline | Yes (tests, real Postgres) |
 | neon-serverless (WebSocket) | Pipeline | Yes (spike, through Neon wsproxy) |
 | Vercel Postgres | Pipeline (uses the neon-serverless client) | No |
 | Netlify DB, WebSocket session | Pipeline, if its client is node-postgres compatible | No |
-| postgres-js, `prepare: true` | Pipelined transaction | Yes (spike) |
-| postgres-js, `prepare: false` | Simple query + inline | Yes (spike) |
-| Bun SQL, `prepare: true` | Pipelined transaction | Yes (spike) |
-| Bun SQL, `prepare: false` | Simple query + inline | Yes (spike) |
+| postgres-js, `prepare: true` | Pipelined transaction (`unsafe(sql, params, { prepare: true })`) | Yes (tests, real Postgres) |
+| postgres-js, `prepare: false` | Pipelined transaction, inline | Yes (tests, real Postgres) |
+| Bun SQL (either `prepare`) | Sequential. Bun SQL 1.3 has no reliable one-round-trip mechanism: pipelined queries with and without parameters get each other's results, a failing pipelined batch hangs once an earlier batch ran on the connection, it does not pipeline with `prepare: false`, and its multi-statement results have the wrong columns. | Yes (tests, real Postgres) |
 | neon-http | Batch API (`transaction([...])`, with the auth token) | No |
 | Netlify DB, HTTP session | Batch API (`httpClient.transaction`) | No |
 | PGlite | Local transaction | Existing e2e tests |
@@ -102,14 +101,15 @@ A driver counts as supported only when its tests run against the real driver (se
 ## 6. Values
 
 - **Default:** every value is a parameter. The package never puts a value into SQL text.
-- **Exception:** postgres-js and Bun SQL with `prepare: false`. For these, the strict encoder writes each value as an untyped `E'…'` literal:
-  - The text form comes from the driver's own value conversion.
+- **Exception:** postgres-js with `prepare: false`. The strict encoder writes each value as an `E'…'` literal:
+  - The placeholders are found with a small SQL lexer that skips string literals, quoted identifiers, dollar-quoted strings and comments. A backslash in a plain string literal throws, because its meaning depends on `standard_conforming_strings`. Every parameter must be used, and no placeholder may be out of range.
+  - The literal copies postgres-js's parameter typing: booleans, bigints and bytes are cast (`::boolean`, `::int8`, `::bytea`), everything else is untyped.
   - `\` becomes `\\` and `'` becomes `''`. The literal does not depend on `standard_conforming_strings`.
-  - Accepted values: string, number, bigint, boolean, null, `Uint8Array` (hex `bytea` form), and valid `Date` (only when the driver's conversion defines its text form).
-  - Anything else throws: objects, arrays, strings with NUL, invalid `Date`, symbols, functions.
+  - Accepted values: string, number, bigint, boolean, null, `Uint8Array` (hex `bytea` form). Drizzle's own column encoders produce only these.
+  - Anything else throws: objects, arrays, `Date` (Drizzle's postgres-js client passes dates through unchanged, so their text form is not defined), strings with NUL, symbols, functions.
   - The encoder never passes a string as the replacement argument of `String.replace` (`$$` would become `$`).
   - Known difference: an untyped `NULL` literal succeeds where an untyped `NULL` parameter fails (error 42P18). This is more permissive and does not change data.
-- **Fuzz test:** the encoder output must equal the parameter result for random strings, bytes, numbers and dates, with `standard_conforming_strings` on and off.
+- **Fuzz test** (`test/pg-inline.test.ts`): through a postgres-js client configured by Drizzle, an inlined value must give the same result as the parameter, for random strings, bytes, numbers, bigints and booleans, with `standard_conforming_strings` on and off.
 
 ## 7. Middleware factory
 

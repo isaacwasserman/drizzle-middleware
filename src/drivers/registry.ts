@@ -13,6 +13,7 @@ import {
 	sessionKindOf,
 } from "../internal/drizzle.js";
 import { nodePostgres } from "./node-postgres.js";
+import { bunSqlPostgres, postgresJs } from "./postgres-js.js";
 import {
 	drizzleAsyncTransaction,
 	drizzleSyncTransaction,
@@ -31,7 +32,10 @@ const bunSqlite: DriverEntry = {
 };
 
 const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(
-	[nodePostgres, pglite, bunSqlite].map((entry) => [entry.sessionKind, entry]),
+	[nodePostgres, postgresJs, bunSqlPostgres, pglite, bunSqlite].map((entry) => [
+		entry.sessionKind,
+		entry,
+	]),
 );
 
 /** The session kinds that have a driver entry. */

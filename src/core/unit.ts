@@ -148,7 +148,11 @@ export function runUnit(
 				(step) => (session) => Promise.resolve().then(() => step(session)),
 			);
 			return driver
-				.use((spec) => runRecordedBatch(spec, target.session, executions))
+				.use((spec) =>
+					runRecordedBatch(spec, target.session, executions, {
+						inTransaction: target.inTransaction,
+					}),
+				)
 				.then(pick);
 		}
 		case "transaction": {

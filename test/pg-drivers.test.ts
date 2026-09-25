@@ -33,6 +33,8 @@ type DriverCase = {
 	sessionKind: SessionKind;
 	/** `max: 1`, so session settings apply to the connection the query uses. */
 	connect(url: string): Connected;
+	/** False for a driver that has no one-round-trip mechanism (sequential). */
+	oneRoundTrip: boolean;
 };
 
 function makeTables(schemaName: string) {
@@ -61,6 +63,7 @@ const drivers: DriverCase[] = [
 	{
 		name: "node-postgres",
 		sessionKind: "NodePgSession",
+		oneRoundTrip: true,
 		connect: (u) => {
 			const pool = new pg.Pool({ connectionString: u, max: 1 });
 			return { db: pool, close: () => pool.end() };
@@ -69,6 +72,7 @@ const drivers: DriverCase[] = [
 	{
 		name: "postgres-js (prepare: true)",
 		sessionKind: "PostgresJsSession",
+		oneRoundTrip: true,
 		connect: (u) => {
 			const client = postgres(u, { max: 1, onnotice: () => {} });
 			return { db: client, close: () => client.end() };
@@ -77,6 +81,7 @@ const drivers: DriverCase[] = [
 	{
 		name: "postgres-js (prepare: false)",
 		sessionKind: "PostgresJsSession",
+		oneRoundTrip: true,
 		connect: (u) => {
 			const client = postgres(u, {
 				max: 1,
@@ -89,8 +94,18 @@ const drivers: DriverCase[] = [
 	{
 		name: "Bun SQL",
 		sessionKind: "BunSQLSession",
+		oneRoundTrip: false,
 		connect: (u) => {
 			const client = new SQL({ url: u, max: 1 });
+			return { db: client, close: () => client.close() };
+		},
+	},
+	{
+		name: "Bun SQL (prepare: false)",
+		sessionKind: "BunSQLSession",
+		oneRoundTrip: false,
+		connect: (u) => {
+			const client = new SQL({ url: u, max: 1, prepare: false });
 			return { db: client, close: () => client.close() };
 		},
 	},
@@ -336,41 +351,44 @@ for (const driver of drivers) {
 				expect(Buffer.from(row.data)).toEqual(data);
 			});
 
-			test("a wrapped query with middleware takes one round trip", async () => {
-				const target = new URL(url as string);
-				const proxy = await startLatencyProxy(
-					{ host: target.hostname, port: Number(target.port || 5432) },
-					LATENCY_MS,
-				);
-				const viaProxy = new URL(url as string);
-				viaProxy.hostname = "127.0.0.1";
-				viaProxy.port = String(proxy.port);
-				const slow = driver.connect(viaProxy.toString());
-				try {
-					const wrapped = withMiddleware(
-						drizzleFor(driver, slow.db, t.relations),
-						() => ({
-							before: [
-								sql`select set_config('app.tenant', ${"acme"}, true)`,
-								insertLog("before"),
-							],
-							after: [insertLog("after")],
-						}),
+			(driver.oneRoundTrip ? test : test.skip)(
+				"a wrapped query with middleware takes one round trip",
+				async () => {
+					const target = new URL(url as string);
+					const proxy = await startLatencyProxy(
+						{ host: target.hostname, port: Number(target.port || 5432) },
+						LATENCY_MS,
 					);
-					const query = () =>
-						wrapped.select().from(t.users).where(eq(t.users.name, "Ada"));
-					// Warm up: the connection, and the driver's statement cache.
-					await query();
-					await query();
-					const start = performance.now();
-					await query();
-					const elapsed = performance.now() - start;
-					expect(elapsed).toBeLessThan(LATENCY_MS * 2);
-				} finally {
-					await slow.close();
-					await proxy.close();
-				}
-			});
+					const viaProxy = new URL(url as string);
+					viaProxy.hostname = "127.0.0.1";
+					viaProxy.port = String(proxy.port);
+					const slow = driver.connect(viaProxy.toString());
+					try {
+						const wrapped = withMiddleware(
+							drizzleFor(driver, slow.db, t.relations),
+							() => ({
+								before: [
+									sql`select set_config('app.tenant', ${"acme"}, true)`,
+									insertLog("before"),
+								],
+								after: [insertLog("after")],
+							}),
+						);
+						const query = () =>
+							wrapped.select().from(t.users).where(eq(t.users.name, "Ada"));
+						// Warm up: the connection, and the driver's statement cache.
+						await query();
+						await query();
+						const start = performance.now();
+						await query();
+						const elapsed = performance.now() - start;
+						expect(elapsed).toBeLessThan(LATENCY_MS * 2);
+					} finally {
+						await slow.close();
+						await proxy.close();
+					}
+				},
+			);
 		},
 	);
 }

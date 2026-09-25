@@ -11,8 +11,8 @@ export type StrategyKind =
 	| "pipeline"
 	/** BEGIN, the statements, and COMMIT, sent concurrently on one connection. */
 	| "pipelined-transaction"
-	/** One multi-statement message; values go through the strict encoder. */
-	| "simple-query-inline"
+	/** Like `pipelined-transaction`, with values inlined by the strict encoder. */
+	| "pipelined-transaction-inline"
 	/** The driver's own atomic batch call, with parameters. */
 	| "batch-api"
 	/** A normal transaction on an in-process database. */
@@ -43,7 +43,16 @@ export interface BatchDriverSpec<TCall, TResult> {
 	send(
 		session: DrizzleSession,
 		calls: readonly TCall[],
+		context: SendContext,
 	): Promise<readonly TResult[]>;
+}
+
+export interface SendContext {
+	/**
+	 * True when the session is already inside a transaction. The batch then
+	 * runs in that transaction; otherwise the driver must make it atomic.
+	 */
+	readonly inTransaction: boolean;
 }
 
 /** A batch failed at statement `index`; the database rolled back the unit. */
@@ -178,12 +187,10 @@ export const DRIVER_PLAN: Readonly<Record<SessionKind, DriverPlan>> = {
 	// `pipelined-transaction` with `prepare: true`, the inline path without it.
 	PostgresJsSession: {
 		dialect: "pg",
-		strategies: ["pipelined-transaction", "simple-query-inline"],
+		strategies: ["pipelined-transaction", "pipelined-transaction-inline"],
 	},
-	BunSQLSession: {
-		dialect: "pg",
-		strategies: ["pipelined-transaction", "simple-query-inline"],
-	},
+	// Bun SQL 1.3 has no reliable one-round-trip mechanism (src/drivers/postgres-js.ts).
+	BunSQLSession: { dialect: "pg", strategies: ["sequential"] },
 	NeonHttpSession: { dialect: "pg", strategies: ["batch-api"] },
 	PgliteSession: { dialect: "pg", strategies: ["local-transaction"] },
 	AwsDataApiSession: { dialect: "pg", strategies: ["sequential"] },
