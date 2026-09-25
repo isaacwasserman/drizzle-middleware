@@ -1,8 +1,14 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { eq, sql } from "drizzle-orm-beta";
+import { defineRelations, eq, sql } from "drizzle-orm-beta";
 import { drizzle } from "drizzle-orm-beta/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm-beta/sqlite-core";
-import { type Middleware, withMiddleware } from "./src/sqlite.ts";
+import { drizzle as drizzleProxy } from "drizzle-orm-beta/sqlite-proxy";
+import {
+	type Middleware,
+	executeBatchTransaction,
+	withMiddleware,
+} from "./src/sqlite.ts";
 
 const users = sqliteTable("users", {
 	id: integer("id").primaryKey({ autoIncrement: true }),
@@ -201,9 +207,219 @@ describe("e2e: bun-sqlite middleware", () => {
 		expect(kvRows).toEqual([{ key: "phase", value: "after" }]);
 	});
 
-	test("wrapped db preserves $client", () => {
+	test("wrapped db blocks $client", () => {
 		const db = createTestDb();
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.$client).toBeDefined();
+		expect(() => wrapped.$client).toThrow("blocked access to `$client`");
+		expect(db.$client).toBeDefined();
+	});
+});
+
+describe("e2e: bun-sqlite fail-closed guard", () => {
+	const posts = sqliteTable("posts", {
+		id: integer("id").primaryKey({ autoIncrement: true }),
+		userId: integer("user_id").notNull(),
+	});
+	const relations = defineRelations({ users, posts }, (r) => ({
+		users: { posts: r.many.posts({ from: r.users.id, to: r.posts.userId }) },
+	}));
+
+	function createRelationalDb() {
+		const db = drizzle(":memory:", { relations, schema: { users, posts } });
+		db.run(
+			sql`CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)`,
+		);
+		db.run(
+			sql`CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL)`,
+		);
+		db.run(sql`CREATE TABLE mw_log (n INTEGER PRIMARY KEY AUTOINCREMENT)`);
+		db.insert(users).values({ name: "Ada" }).run();
+		db.insert(posts).values({ userId: 1 }).run();
+		return db;
+	}
+
+	function middlewareRuns(db: ReturnType<typeof createRelationalDb>) {
+		return db.get<{ n: number }>(sql`SELECT count(*) AS n FROM mw_log`)?.n;
+	}
+
+	test("blocks direct driver access through the wrapped session", () => {
+		const db = createRelationalDb();
+		const wrapped = withMiddleware(db, () => ({}));
+		const session = (wrapped as any).session;
+
+		expect(() => session.client).toThrow("blocked access to `client`");
+		expect(() => session.exec("SELECT 1")).toThrow("blocked access to `exec`");
+		expect(() => Object.getOwnPropertyDescriptor(session, "client")).toThrow(
+			"blocked access to `client`",
+		);
+	});
+
+	test("every supported query API still runs the middleware", async () => {
+		const db = createRelationalDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+		}));
+
+		expect(
+			await wrapped.query.users.findMany({ with: { posts: true } }),
+		).toEqual([{ id: 1, name: "Ada", posts: [{ id: 1, userId: 1 }] }]);
+		expect(await wrapped.query.users.findFirst()).toEqual({
+			id: 1,
+			name: "Ada",
+		});
+		expect(await (wrapped as any)._query.users.findMany()).toEqual([
+			{ id: 1, name: "Ada" },
+		]);
+		const prepared = wrapped
+			.select()
+			.from(users)
+			.where(eq(users.id, sql.placeholder("id")))
+			.prepare();
+		expect(prepared.all({ id: 1 })).toEqual([{ id: 1, name: "Ada" }]);
+		expect(await wrapped.$count(users)).toBe(1);
+		wrapped.run(sql`SELECT 1`);
+		wrapped.all(sql`SELECT 1`);
+		wrapped.get(sql`SELECT 1`);
+		wrapped.values(sql`SELECT 1`);
+		expect(middlewareRuns(db)).toBe(9);
+
+		// A transaction runs the middleware once, at its boundary.
+		wrapped.transaction((tx) => {
+			tx.select().from(users).all();
+			tx.transaction((nested) => {
+				nested.select().from(users).all();
+			});
+		});
+		expect(middlewareRuns(db)).toBe(10);
+	});
+
+	test("nested transaction on a wrapped transaction runs the middleware", () => {
+		const db = createRelationalDb();
+
+		db.transaction((tx) => {
+			const inner = withMiddleware(tx, () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			}));
+			const outer = withMiddleware(inner, () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			}));
+			outer.transaction((savepoint) => {
+				savepoint.insert(users).values({ name: "Kept" }).run();
+			});
+			expect(() =>
+				outer.transaction((savepoint) => {
+					savepoint.insert(users).values({ name: "Dropped" }).run();
+					throw new Error("roll back the savepoint");
+				}),
+			).toThrow("roll back the savepoint");
+		});
+
+		expect(db.select({ name: users.name }).from(users).all()).toEqual([
+			{ name: "Ada" },
+			{ name: "Kept" },
+		]);
+		// Both layers ran inside each savepoint. The rolled-back savepoint also
+		// rolled back its middleware rows.
+		expect(middlewareRuns(db)).toBe(2);
+	});
+
+	test("stacked middleware on a transaction runs each layer once", () => {
+		const db = createRelationalDb();
+		const order: string[] = [];
+
+		db.transaction((tx) => {
+			const inner = withMiddleware(tx, () => {
+				order.push("inner");
+				return { before: [sql`INSERT INTO mw_log DEFAULT VALUES`] };
+			});
+			const outer = withMiddleware(inner, () => {
+				order.push("outer");
+				return { before: [sql`INSERT INTO mw_log DEFAULT VALUES`] };
+			});
+			outer.select().from(users).all();
+		});
+
+		expect(order).toEqual(["outer", "inner"]);
+		expect(middlewareRuns(db)).toBe(2);
+	});
+});
+
+describe("e2e: sqlite-proxy sequential transaction", () => {
+	// A proxy db whose remote side is a bun:sqlite database. The proxy sends
+	// one statement per callback call; each call is logged.
+	function createProxyDb() {
+		const sqlite = new Database(":memory:");
+		sqlite.run(
+			"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+		);
+		sqlite.run("CREATE TABLE mw_log (n INTEGER PRIMARY KEY AUTOINCREMENT)");
+		sqlite.run("INSERT INTO users (name) VALUES ('Ada')");
+		const calls: string[] = [];
+		const db = drizzleProxy(async (query, params, method) => {
+			calls.push(query);
+			const statement = sqlite.query(query);
+			if (method === "run") {
+				statement.run(...(params as any[]));
+				return { rows: [] };
+			}
+			const rows = statement.values(...(params as any[]));
+			return { rows: method === "get" ? (rows[0] ?? []) : rows };
+		});
+		const logCount = () =>
+			(sqlite.query("SELECT count(*) AS n FROM mw_log").get() as { n: number })
+				.n;
+		return { db, calls, logCount };
+	}
+
+	test("runs before, the query, and after one at a time in a transaction", async () => {
+		const { db, calls, logCount } = createProxyDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			after: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+		}));
+
+		expect(await wrapped.select().from(users)).toEqual([
+			{ id: 1, name: "Ada" },
+		]);
+		expect(calls).toEqual([
+			"begin",
+			"INSERT INTO mw_log DEFAULT VALUES",
+			'select "id", "name" from "users"',
+			"INSERT INTO mw_log DEFAULT VALUES",
+			"commit",
+		]);
+		expect(logCount()).toBe(2);
+	});
+
+	test("a failed statement rolls back the whole envelope", async () => {
+		const { db, calls, logCount } = createProxyDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			after: [sql`INSERT INTO missing_table DEFAULT VALUES`],
+		}));
+
+		await expect(
+			Promise.resolve(wrapped.insert(users).values({ name: "Bob" })),
+		).rejects.toThrow("missing_table");
+		expect(calls.at(-1)).toBe("rollback");
+		// Neither the middleware row nor the insert was kept.
+		expect(logCount()).toBe(0);
+		expect(await db.select().from(users)).toEqual([{ id: 1, name: "Ada" }]);
+	});
+
+	test("executeBatchTransaction runs in one transaction", async () => {
+		const { db, calls } = createProxyDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+		}));
+
+		expect(
+			await executeBatchTransaction([
+				wrapped.insert(users).values({ name: "Bob" }).returning(),
+				wrapped.select().from(users).where(eq(users.name, "Bob")),
+			]),
+		).toEqual([[{ id: 2, name: "Bob" }], [{ id: 2, name: "Bob" }]]);
+		expect(calls[0]).toBe("begin");
+		expect(calls.at(-1)).toBe("commit");
 	});
 });

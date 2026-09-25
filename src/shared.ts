@@ -127,9 +127,59 @@ export interface MiddlewareConfig {
 	rawPrepareArgs: () => any[];
 	txPrepareArgs: () => any[];
 	makeDbArgs: (d: any, dialect: any, session: any, schemaArg: any) => any[];
+	// The class whose constructor takes `makeDbArgs`, when the db's own class
+	// has a different constructor. The wrapped db keeps the db's own prototype.
+	dbClass?: new (
+		...args: any[]
+	) => any;
 	isSync?: boolean;
 	isTransactionInput?: boolean;
 	execBatch?: (statements: string[], session: any, arrayMode?: boolean) => any;
+	// The dialect's `withMiddleware`. It wraps the nested transaction that a
+	// wrapped transaction input opens.
+	wrap: (db: any, middleware: Middleware) => any;
+	// Members that a wrapped session or prepared query may expose. Reading any
+	// other string-keyed member throws (fail closed). When a set is absent, all
+	// members pass through.
+	sessionMembers?: ReadonlySet<string>;
+	preparedMembers?: ReadonlySet<string>;
+}
+
+// Symbol-keyed members always pass through: they carry our own state
+// (MW_STATE, RAW_PREPARED) and runtime hooks, and Drizzle defines no
+// symbol-keyed method that can reach the driver.
+function isAllowedMember(
+	prop: string | symbol,
+	allowed: ReadonlySet<string> | undefined,
+): boolean {
+	return typeof prop === "symbol" || !allowed || allowed.has(prop);
+}
+
+function blockedMember(prop: string, what: string): Error {
+	return new Error(
+		`drizzle-middleware: blocked access to \`${prop}\` on a wrapped ${what}. This member could send a query to the database without running the middleware. If you need this Drizzle API, please open an issue.`,
+	);
+}
+
+// Proxy traps that block every member not in `allowed`. The descriptor trap
+// stops a caller from reading a blocked value through
+// `Object.getOwnPropertyDescriptor`.
+function guardTraps<T extends object>(
+	allowed: ReadonlySet<string> | undefined,
+	what: string,
+): Required<Pick<ProxyHandler<T>, "get" | "getOwnPropertyDescriptor">> {
+	return {
+		get(target, prop, receiver) {
+			if (!isAllowedMember(prop, allowed))
+				throw blockedMember(prop as string, what);
+			return Reflect.get(target, prop, receiver);
+		},
+		getOwnPropertyDescriptor(target, prop) {
+			if (!isAllowedMember(prop, allowed))
+				throw blockedMember(prop as string, what);
+			return Reflect.getOwnPropertyDescriptor(target, prop);
+		},
+	};
 }
 
 // A wrapped session advertises its middleware layer under this symbol. That is
@@ -154,6 +204,7 @@ type MiddlewareState = {
 type EnvelopeItem = {
 	sqlObj: SQL;
 	capturedArgs: unknown[];
+	prepareMethod: string;
 	rowMode: "array" | "object";
 	joinsNotNullableMap: Record<string, boolean> | undefined;
 };
@@ -236,7 +287,10 @@ export function executeBatch(
 	session: any,
 	arrayMode = false,
 ): any {
-	const client = session.client;
+	// A libSQL transaction session keeps the open transaction on `tx` and the
+	// main client on `client`. Sending on `client` would run the statements
+	// outside the transaction.
+	const client = session.tx ?? session.client;
 	const joined = statements.join(";\n");
 
 	if (client?.batch) {
@@ -310,6 +364,83 @@ function dispatchBatch(
 	return rawResult;
 }
 
+// Prepare a captured query again on another session (a transaction) and run
+// it, so Drizzle's own prepared query executes and maps the result.
+function runCapturedQuery(
+	txSession: InternalSession,
+	prepareMethod: string,
+	capturedArgs: unknown[],
+	storedToken: unknown,
+	joinsNotNullableMap: Record<string, boolean> | undefined,
+	prop: string,
+	execArgs: any[],
+): any {
+	const txPrepared = (txSession as any)[prepareMethod](...capturedArgs);
+	if (storedToken && txPrepared.setToken) txPrepared.setToken(storedToken);
+	if (joinsNotNullableMap) txPrepared.joinsNotNullableMap = joinsNotNullableMap;
+	return txPrepared[prop](...execArgs);
+}
+
+// -----------------------------------------------------------------------
+// Sequential transaction path — for drivers that run one statement per call
+// and cannot batch (Prisma, the SQLite proxy). Before, the queries, and after
+// run one at a time inside one transaction.
+// -----------------------------------------------------------------------
+
+type SequentialTransaction = (
+	session: any,
+	run: (txSession: InternalSession) => Promise<unknown>,
+) => Promise<unknown>;
+
+// Drizzle's Prisma sessions throw on `transaction()`. Open a Prisma
+// interactive transaction, and run on a copy of the session that is bound to
+// the transaction client.
+const prismaTransaction: SequentialTransaction = (session, run) =>
+	session.prisma.$transaction((txPrisma: unknown) =>
+		run(
+			Object.assign(Object.create(Object.getPrototypeOf(session)), session, {
+				prisma: txPrisma,
+			}),
+		),
+	);
+
+// Drizzle's own transaction, for a driver that has one but cannot batch.
+const drizzleTransaction: SequentialTransaction = (session, run) =>
+	session.transaction((tx: any) => run(tx.session));
+
+const SEQUENTIAL_TRANSACTIONS = new Map<string, SequentialTransaction>([
+	["PrismaPgSession", prismaTransaction],
+	["PrismaSQLiteSession", prismaTransaction],
+	// The SQLite proxy sends one statement per callback call.
+	["SQLiteRemoteSession", drizzleTransaction],
+]);
+
+function sequentialTransaction(
+	session: any,
+): SequentialTransaction | undefined {
+	return SEQUENTIAL_TRANSACTIONS.get(session?.constructor?.[entityKind]);
+}
+
+function runEnvelopeSequential(
+	before: SQL[],
+	items: ((txSession: InternalSession) => unknown)[],
+	after: SQL[],
+	session: InternalSession,
+	dialect: any,
+	txPrepareArgs: any[],
+	open: SequentialTransaction,
+): Promise<any[]> {
+	return open(session, async (txSession) => {
+		const runStatement = (s: SQL) =>
+			txSession.prepareQuery(dialect.sqlToQuery(s), ...txPrepareArgs).execute();
+		for (const s of before) await runStatement(s);
+		const results: unknown[] = [];
+		for (const run of items) results.push(await run(txSession));
+		for (const s of after) await runStatement(s);
+		return results;
+	}) as Promise<any[]>;
+}
+
 // -----------------------------------------------------------------------
 // Sync execution path — queries run individually within a sync tx.
 // Used by sync SQLite drivers where multi-statement prepared queries
@@ -362,14 +493,16 @@ function execSync(
 	const results = runEnvelopeSync(
 		before,
 		[
-			(txSession) => {
-				const txPrepared = (txSession as any)[prepareMethod](...capturedArgs);
-				if (storedToken && txPrepared.setToken)
-					txPrepared.setToken(storedToken);
-				if (joinsNotNullableMap)
-					txPrepared.joinsNotNullableMap = joinsNotNullableMap;
-				return txPrepared[prop](...execArgs);
-			},
+			(txSession) =>
+				runCapturedQuery(
+					txSession,
+					prepareMethod,
+					capturedArgs,
+					storedToken,
+					joinsNotNullableMap,
+					prop,
+					execArgs,
+				),
 		],
 		after,
 		rawSession(session),
@@ -395,9 +528,13 @@ function execSyncInTransaction(
 	prop: string,
 	execArgs: any[],
 ) {
-	for (const s of before) execSyncSideEffect(s, dialect, session, config);
-	const result = (target as any)[prop](...execArgs);
-	for (const s of after) execSyncSideEffect(s, dialect, session, config);
+	// `before`/`after` already hold every stacked layer, so run the statements
+	// and the real prepared query without passing through an inner layer again.
+	const txSession = rawSession(session);
+	const raw = (target as any)[RAW_PREPARED] ?? target;
+	for (const s of before) execSyncSideEffect(s, dialect, txSession, config);
+	const result = raw[prop](...execArgs);
+	for (const s of after) execSyncSideEffect(s, dialect, txSession, config);
 	return result;
 }
 
@@ -468,8 +605,34 @@ function execAsync(
 	config: MiddlewareConfig,
 	storedToken: unknown,
 	joinsNotNullableMap: Record<string, boolean> | undefined,
+	prop: string,
 	execArgs: any[],
 ) {
+	const sendSession = rawSession(session);
+	const open = sequentialTransaction(sendSession);
+	if (open) {
+		return runEnvelopeSequential(
+			before,
+			[
+				(txSession) =>
+					runCapturedQuery(
+						txSession,
+						prepareMethod,
+						capturedArgs,
+						storedToken,
+						joinsNotNullableMap,
+						prop,
+						execArgs,
+					),
+			],
+			after,
+			sendSession,
+			dialect,
+			config.txPrepareArgs(),
+			open,
+		).then((results) => results[0]);
+	}
+
 	const placeholderValues = execArgs[0] as Record<string, unknown> | undefined;
 	const resolvedSql = placeholderValues
 		? resolvePlaceholders(capturedSqlObj, placeholderValues)
@@ -481,12 +644,13 @@ function execAsync(
 			{
 				sqlObj: resolvedSql,
 				capturedArgs,
+				prepareMethod,
 				rowMode: getRowMode(prepareMethod, capturedArgs),
 				joinsNotNullableMap,
 			},
 		],
 		after,
-		rawSession(session),
+		sendSession,
 		dialect,
 		config.rawPrepareArgs(),
 		config.execBatch,
@@ -510,23 +674,26 @@ function execAsyncInTransaction(
 	prop: string,
 	execArgs: any[],
 ) {
+	// When layers are stacked, `session` and `target` belong to the inner layer.
+	// `before`/`after` already hold every layer, so use the real transaction
+	// session and prepared query: no layer runs twice, and the member guard
+	// does not block our own driver access.
+	const txSession = rawSession(session);
+	const raw = (target as any)[RAW_PREPARED] ?? target;
+	// Run each statement through Drizzle's own prepared query on the
+	// transaction session. Drizzle routes it to the transaction's connection
+	// for every driver; a driver-level batch could use another connection.
 	const runBatch = async (stmts: SQL[]) => {
-		const parts = stmts.map((s) => inlineSql(s, dialect));
-		const result = config.execBatch?.(parts, session);
-		if (result !== undefined) {
-			await result;
-			return;
-		}
-		for (const stmt of parts) {
-			await session
-				.prepareQuery({ sql: stmt, params: [] }, ...config.txPrepareArgs())
+		for (const s of stmts) {
+			await txSession
+				.prepareQuery(dialect.sqlToQuery(s), ...config.txPrepareArgs())
 				.execute();
 		}
 	};
 
 	return (async () => {
 		if (before.length > 0) await runBatch(before);
-		const result = await (target as any)[prop](...execArgs);
+		const result = await raw[prop](...execArgs);
 		if (after.length > 0) await runBatch(after);
 		return result;
 	})();
@@ -547,8 +714,13 @@ function wrapPreparedQuery(
 	config: MiddlewareConfig,
 ): InternalPreparedQuery {
 	let storedToken: unknown;
+	const guard = guardTraps<InternalPreparedQuery>(
+		config.preparedMembers,
+		"prepared query",
+	);
 
 	return new Proxy(prepared, {
+		getOwnPropertyDescriptor: guard.getOwnPropertyDescriptor,
 		get(target, prop, receiver) {
 			// Expose the innermost real prepared query so an outer layer (or the
 			// fast path) can run it without re-triggering middleware.
@@ -625,6 +797,7 @@ function wrapPreparedQuery(
 						config,
 						storedToken,
 						target.joinsNotNullableMap,
+						prop,
 						execArgs,
 					);
 				};
@@ -638,7 +811,7 @@ function wrapPreparedQuery(
 				};
 			}
 
-			return Reflect.get(target, prop, receiver);
+			return guard.get(target, prop, receiver);
 		},
 	});
 }
@@ -702,8 +875,10 @@ export function wrapSession(
 		dialect,
 		baseSession: session,
 	};
+	const guard = guardTraps<InternalSession>(config.sessionMembers, "session");
 
 	return new Proxy(session, {
+		getOwnPropertyDescriptor: guard.getOwnPropertyDescriptor,
 		get(target, prop, receiver) {
 			// Advertise this layer so outer layers and executeBatchTransaction can
 			// walk the full middleware stack.
@@ -754,7 +929,7 @@ export function wrapSession(
 				return (fn: (tx: any) => any, txConfig?: unknown) =>
 					txBoundary(target, dialect, middleware, config, fn, txConfig);
 			}
-			return Reflect.get(target, prop, receiver);
+			return guard.get(target, prop, receiver);
 		},
 	});
 }
@@ -833,6 +1008,7 @@ function collectQuery(
 	return {
 		sqlObj: dialectCapture.lastCapturedSql,
 		capturedArgs: captured.args,
+		prepareMethod: captured.prepareMethod,
 		rowMode: getRowMode(captured.prepareMethod, captured.args),
 		joinsNotNullableMap: captured.stub.joinsNotNullableMap,
 	};
@@ -904,6 +1080,37 @@ export function executeBatchTransaction<
 	const dialectCapture = wrapDialectCapture(realDialect);
 	const collected = list.map((query) => collectQuery(query, dialectCapture));
 
+	// A driver that runs one statement per call (Prisma) cannot batch. Run
+	// before, each query, and after one at a time in the driver's transaction.
+	const open = sequentialTransaction(sendSession);
+	if (open) {
+		const txPrepareArgs = outer
+			? outer.config.txPrepareArgs()
+			: kind === "SQLiteAsyncDialect"
+				? [undefined, "run", false]
+				: [undefined, undefined, false];
+		return runEnvelopeSequential(
+			before,
+			collected.map(
+				(it) => (txSession: InternalSession) =>
+					runCapturedQuery(
+						txSession,
+						it.prepareMethod,
+						it.capturedArgs,
+						undefined,
+						it.joinsNotNullableMap,
+						"execute",
+						[],
+					),
+			),
+			after,
+			sendSession,
+			dialect,
+			txPrepareArgs,
+			open,
+		) as Promise<Results>;
+	}
+
 	const rawPrepareArgs = outer
 		? outer.config.rawPrepareArgs()
 		: kind === "SQLiteAsyncDialect"
@@ -944,10 +1151,47 @@ export function buildWrappedDb(
 			}
 		: undefined;
 
-	const newDb = new db.constructor(
-		...config.makeDbArgs(db, dialectCapture.dialect, wrappedSession, schemaArg),
+	const newDb: any = Reflect.construct(
+		config.dbClass ?? db.constructor,
+		config.makeDbArgs(db, dialectCapture.dialect, wrappedSession, schemaArg),
+		db.constructor,
 	);
-	if (db.$client) newDb.$client = db.$client;
+	// A db class with its own constructor signature would ignore our
+	// arguments and build an unwrapped session. Fail closed.
+	if (
+		newDb.session !== wrappedSession ||
+		newDb.dialect !== dialectCapture.dialect
+	) {
+		throw new Error(
+			`drizzle-middleware: cannot wrap ${db.constructor?.[entityKind] ?? "this db"}. Its constructor does not take the session and dialect that withMiddleware passes, so the result would not run the middleware.`,
+		);
+	}
+	// `$client` is the raw driver: a query sent on it skips the middleware.
+	// Fail closed. A caller that needs the driver must use the unwrapped db.
+	// `in` does not run the getter, so an already-wrapped db can be wrapped.
+	if ("$client" in db)
+		Object.defineProperty(newDb, "$client", {
+			get() {
+				throw new Error(
+					"drizzle-middleware: blocked access to `$client` on a wrapped db. A query sent on the driver client does not run the middleware. Use the unwrapped db's `$client` if you need the driver.",
+				);
+			},
+			enumerable: false,
+		});
 	if (db.$cache) newDb.$cache = db.$cache;
+	// A nested transaction (savepoint) on a wrapped transaction input. The
+	// driver opens it on the input transaction, and the nested transaction is
+	// wrapped with the same middleware, so its queries run the middleware too.
+	// This also works for drivers that open the savepoint on `session.client`
+	// (postgres-js, Bun SQL), which the guard blocks on a wrapped session. For
+	// stacked layers, `db` is the inner wrapped transaction, so each layer
+	// wraps the nested transaction in turn.
+	if (config.isTransactionInput) {
+		newDb.transaction = (fn: (tx: any) => unknown, ...rest: unknown[]) =>
+			db.transaction(
+				(nested: any) => fn(config.wrap(nested, middleware)),
+				...rest,
+			);
+	}
 	return newDb;
 }

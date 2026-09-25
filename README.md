@@ -72,6 +72,18 @@ await db.transaction(async (tx) => {
 // COMMIT
 ```
 
+You can also wrap a transaction that is already open. Then before/after run around each query in it, and a nested transaction (savepoint) is wrapped with the same middleware:
+
+```ts
+await baseDb.transaction(async (tx) => {
+  const wrapped = withMiddleware(tx, middleware);
+  await wrapped.select().from(users); // before, query, after
+  await wrapped.transaction(async (savepoint) => {
+    await savepoint.insert(logs).values({ action: "read" }); // before, query, after
+  });
+});
+```
+
 ### Dynamic middleware
 
 The middleware factory is called on every query execution. Return different statements based on request context:
@@ -101,6 +113,12 @@ const db = withMiddleware(baseDb, () => ({
 
 db.select().from(users).all();
 ```
+
+### Drivers that cannot batch
+
+Prisma (PG and SQLite) and the SQLite proxy driver run one statement per call, so they cannot batch. For these drivers, the middleware opens a transaction (a Prisma interactive transaction, or the proxy's own `begin` … `commit`) and runs before, the query, and after one at a time in it. They are still atomic, but each statement is a separate round trip.
+
+pg-proxy and Xata are not supported. They have no batch and no transactions, so separate calls would not be atomic, and transaction-local state such as `set_config(..., true)` would not reach the query. `withMiddleware` throws for them.
 
 ## Batched transactions
 
@@ -150,6 +168,17 @@ const audited = withMiddleware(rls, () => ({
 // One round trip: set_config → user query → audit insert.
 await audited.select().from(users);
 ```
+
+### Fail-closed guard
+
+A wrapped db only exposes the session and prepared-query members that are known to run the middleware. If Drizzle code tries to read any other member, for example the driver client or a method that calls the driver directly, the read throws. It does not skip the middleware:
+
+```ts
+const db = withMiddleware(libsqlDb, middleware);
+await db.batch([...]); // throws: `batch` sends queries without the middleware
+```
+
+This applies to Postgres and SQLite. A member that a new Drizzle version adds is blocked until it is reviewed. `$client` on a wrapped db also throws, because a query sent on the driver does not run the middleware. The guard applies only to access through the wrapped db: the unwrapped db and its `$client` still reach the driver directly.
 
 ## API Reference
 

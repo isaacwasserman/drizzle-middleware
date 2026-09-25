@@ -2,8 +2,28 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { entityKind, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
-import { BaseSQLiteDatabase as BaseSQLiteDatabaseBeta } from "drizzle-orm-beta/sqlite-core";
-import { type Middleware, withMiddleware } from "./src/sqlite.ts";
+import { LibSQLSession } from "drizzle-orm-beta/libsql/session";
+import { PrismaSQLiteSession } from "drizzle-orm-beta/prisma/sqlite/session";
+import {
+	BaseSQLiteDatabase as BaseSQLiteDatabaseBeta,
+	SQLiteAsyncDialect,
+	SQLiteTransaction,
+	integer,
+	sqliteTable,
+} from "drizzle-orm-beta/sqlite-core";
+import {
+	PREPARED_ALLOWED,
+	PREPARED_DENIED,
+	SESSION_ALLOWED,
+	SESSION_DENIED,
+} from "./src/sqlite-guard.ts";
+import {
+	type Middleware,
+	executeBatchTransaction,
+	withMiddleware,
+} from "./src/sqlite.ts";
+import { fakePrisma } from "./test-helpers/fake-prisma.ts";
+import { reviewDrizzleMembers } from "./test-helpers/member-review.ts";
 
 type Log = string[];
 
@@ -119,6 +139,83 @@ function getCombinedPrepare(log: Log): string {
 	return entry;
 }
 
+// A fake libSQL client. Each call is logged with the handle that got it: the
+// main `client`, or the interactive `tx` that `client.transaction()` opens.
+function fakeLibsqlClient(log: Log) {
+	const resultSet = {
+		rows: [],
+		columns: [],
+		columnTypes: [],
+		rowsAffected: 0,
+		lastInsertRowid: undefined,
+	};
+	const handle = (who: string) => ({
+		execute: async (query: { sql: string }) => {
+			log.push(`${who}.execute: ${query.sql}`);
+			return resultSet;
+		},
+		batch: async (queries: { sql: string }[]) => {
+			for (const q of queries) log.push(`${who}.batch: ${q.sql}`);
+			return queries.map(() => resultSet);
+		},
+	});
+	return {
+		...handle("client"),
+		transaction: async () => ({
+			...handle("tx"),
+			commit: async () => log.push("tx.commit"),
+			rollback: async () => log.push("tx.rollback"),
+		}),
+	};
+}
+
+function fakeLibsqlDb(log: Log) {
+	const dialect = new SQLiteAsyncDialect();
+	return new (BaseSQLiteDatabaseBeta as any)(
+		"async",
+		dialect,
+		new LibSQLSession(
+			fakeLibsqlClient(log) as any,
+			dialect,
+			{} as any,
+			undefined,
+			{},
+			undefined,
+		),
+		{},
+		undefined,
+	);
+}
+
+const libsqlTable = sqliteTable("t", { id: integer("id") });
+
+// ---------------------------------------------------------------------------
+// Member review for the fail-closed guard
+// ---------------------------------------------------------------------------
+
+function reviewDrizzleSqliteMembers() {
+	return reviewDrizzleMembers({
+		coreDir: "sqlite-core",
+		sessionBases: ["SQLiteSession"],
+		preparedBases: ["SQLitePreparedQuery"],
+		session: {
+			allowed: SESSION_ALLOWED,
+			denied: SESSION_DENIED,
+			intercepted: new Set([
+				"prepareQuery",
+				"prepareRelationalQuery",
+				"prepareOneTimeRelationalQuery",
+				"transaction",
+			]),
+		},
+		prepared: {
+			allowed: PREPARED_ALLOWED,
+			denied: PREPARED_DENIED,
+			intercepted: new Set(["execute", "run", "all", "get", "values"]),
+		},
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -130,13 +227,20 @@ describe("withMiddleware (sqlite)", () => {
 		expect(wrapped).not.toBe(db);
 	});
 
-	test("preserves $client and $cache", () => {
+	test("blocks $client and preserves $cache", () => {
 		const db = mockDb([]);
 		db.$client = { fake: "client" };
 		db.$cache = { fake: "cache" };
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.$client).toEqual({ fake: "client" });
+		expect(() => wrapped.$client).toThrow(
+			"blocked access to `$client` on a wrapped db",
+		);
 		expect(wrapped.$cache).toEqual({ fake: "cache" });
+		// The unwrapped db keeps its client, and a wrapped db can be wrapped.
+		expect(db.$client).toEqual({ fake: "client" });
+		expect(() => withMiddleware(wrapped, () => ({})).$client).toThrow(
+			"blocked access to `$client`",
+		);
 	});
 
 	test("fast path: no before/after skips transaction", async () => {
@@ -273,13 +377,241 @@ describe("withMiddleware (sqlite)", () => {
 		expect(result).toEqual([{ mapped: true, id: 1 }]);
 	});
 
-	test("non-intercepted session properties pass through", () => {
+	test("driver transactions (subclasses) are detected as tx input", async () => {
+		const log: Log = [];
+		const db = fakeLibsqlDb(log);
+
+		await db.transaction(async (tx: any) => {
+			// `LibSQLTransaction` subclasses `SQLiteTransaction`.
+			expect(tx.constructor[entityKind]).toBe("LibSQLTransaction");
+			const wrapped = withMiddleware(tx, () => ({
+				before: [sql`INSERT INTO kv VALUES ('tenant')`],
+				after: [sql`DELETE FROM kv`],
+			}));
+			await wrapped.select().from(libsqlTable);
+		});
+
+		// Everything runs on the open transaction, none on the main client.
+		expect(log).toEqual([
+			"tx.execute: INSERT INTO kv VALUES ('tenant')",
+			'tx.execute: select "id" from "t"',
+			"tx.execute: DELETE FROM kv",
+			"tx.commit",
+		]);
+	});
+
+	test("libSQL: nested transaction on a wrapped transaction runs the middleware", async () => {
+		const log: Log = [];
+		const db = fakeLibsqlDb(log);
+
+		await db.transaction(async (tx: any) => {
+			const wrapped = withMiddleware(tx, () => ({
+				before: [sql`INSERT INTO kv VALUES ('tenant')`],
+			}));
+			await wrapped.transaction(async (savepoint: any) => {
+				await savepoint.select().from(libsqlTable);
+			});
+		});
+
+		expect(log).toEqual([
+			"tx.execute: savepoint sp0",
+			"tx.execute: INSERT INTO kv VALUES ('tenant')",
+			'tx.execute: select "id" from "t"',
+			"tx.execute: release savepoint sp0",
+			"tx.commit",
+		]);
+	});
+
+	test("Prisma SQLite: runs each statement in order in a Prisma transaction", async () => {
+		const log: Log = [];
+		const dialect = new SQLiteAsyncDialect();
+		const db = new (BaseSQLiteDatabaseBeta as any)(
+			"async",
+			dialect,
+			new PrismaSQLiteSession(fakePrisma(log) as any, dialect, {}),
+			{},
+			undefined,
+		);
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', ${"acme"})`],
+			after: [sql`DELETE FROM kv`],
+		})) as any;
+
+		expect(await wrapped.select().from(libsqlTable)).toEqual([{ id: 1 }]);
+		expect(
+			await executeBatchTransaction([wrapped.select().from(libsqlTable)]),
+		).toEqual([[{ id: 1 }]]);
+
+		const envelope = [
+			"begin",
+			`tx: INSERT INTO kv (key, value) VALUES ('tenant', ?) ["acme"]`,
+			'tx: select "id" from "t"',
+			"tx: DELETE FROM kv",
+			"commit",
+		];
+		expect(log).toEqual([...envelope, ...envelope]);
+	});
+
+	test("executeBatchTransaction on a libSQL transaction uses the transaction", async () => {
+		const log: Log = [];
+		const db = fakeLibsqlDb(log);
+
+		await db.transaction(async (tx: any) => {
+			await executeBatchTransaction([tx.select().from(libsqlTable)]);
+		});
+
+		expect(log).toEqual(['tx.batch: select "id" from "t"', "tx.commit"]);
+	});
+
+	test("keeps the relational-query flags of the input db", () => {
+		const db = new (BaseSQLiteDatabaseBeta as any)(
+			"async",
+			mockDialect,
+			createMockSession([]),
+			{},
+			undefined,
+			true,
+			true,
+		);
+		const tx = new (SQLiteTransaction as any)(
+			"async",
+			mockDialect,
+			createMockSession([]),
+			{},
+			undefined,
+			2,
+			true,
+			true,
+		);
+
+		for (const input of [db, tx]) {
+			const wrapped = withMiddleware(input, () => ({})) as any;
+			expect(wrapped.rowModeRQB).toBe(true);
+			expect(wrapped.forbidJsonb).toBe(true);
+		}
+		expect((withMiddleware(tx, () => ({})) as any).nestedIndex).toBe(2);
+	});
+
+	test("sync tx input: stacked layers each run once", () => {
+		const log: Log = [];
+		const syncPrepared = (id: string) => ({
+			run: () => log.push(`run:${id}`),
+			all: () => {
+				log.push(`all:${id}`);
+				return [{ id: 1 }];
+			},
+			joinsNotNullableMap: undefined,
+		});
+		const session = {
+			prepareQuery: (query: { sql: string }) => syncPrepared(query.sql),
+		};
+		const txDb = new (SQLiteTransaction as any)(
+			"sync",
+			mockDialect,
+			session,
+			{},
+			undefined,
+			0,
+		);
+
+		const inner = withMiddleware(txDb, () => ({
+			before: [sql`SELECT 'inner'`],
+		}));
+		const outer = withMiddleware(inner, () => ({
+			before: [sql`SELECT 'outer'`],
+		}));
+		outer.session.prepareQuery({ sql: "SELECT 1" }).all();
+
+		expect(log).toEqual([
+			"run:SELECT 'outer'",
+			"run:SELECT 'inner'",
+			"all:SELECT 1",
+		]);
+	});
+
+	// -------------------------------------------------------------------
+	// Fail-closed member guard
+	// -------------------------------------------------------------------
+
+	test("allowed session members pass through", () => {
 		const log: Log = [];
 		const db = mockDb(log);
+		db.session.dialect = mockDialect;
+		db.session.options = { logger: "x" };
+
+		const wrapped = withMiddleware(db, () => ({}));
+		expect(wrapped.session.options).toEqual({ logger: "x" });
+		expect(wrapped.session.dialect).toBe(mockDialect);
+	});
+
+	test("unknown session members are blocked", () => {
+		const log: Log = [];
+		const db = mockDb(log);
+		db.session.client = { exec: () => log.push("client:exec") };
 		db.session.customProp = "hello";
 
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.session.customProp).toBe("hello");
+		for (const prop of ["client", "customProp"]) {
+			expect(() => wrapped.session[prop]).toThrow(
+				`blocked access to \`${prop}\` on a wrapped session`,
+			);
+			expect(() =>
+				Object.getOwnPropertyDescriptor(wrapped.session, prop),
+			).toThrow(`blocked access to \`${prop}\``);
+		}
+		expect(log).toEqual([]);
+	});
+
+	test("unknown prepared-query members are blocked", () => {
+		const log: Log = [];
+		const db = mockDb(log);
+		const wrapped = withMiddleware(db, () => ({}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		expect(() => prepared.stmt).toThrow(
+			"blocked access to `stmt` on a wrapped prepared query",
+		);
+		expect(() => prepared.allRqbV2).toThrow("blocked access to `allRqbV2`");
+		expect(prepared.joinsNotNullableMap).toBeUndefined();
+	});
+
+	test("LibSQLSession.batch and migrate are blocked (they skip the middleware)", () => {
+		const sent: string[] = [];
+		const client = {
+			batch: async (queries: { sql: string }[]) => {
+				for (const q of queries) sent.push(q.sql);
+				return [];
+			},
+			migrate: async (queries: { sql: string }[]) => {
+				for (const q of queries) sent.push(q.sql);
+				return [];
+			},
+		};
+
+		const db = new (BaseSQLiteDatabaseBeta as any)(
+			"async",
+			mockDialect,
+			new LibSQLSession(
+				client as any,
+				mockDialect as any,
+				{} as any,
+				undefined,
+				{},
+				undefined,
+			),
+			{},
+			undefined,
+		);
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', 'x')`],
+		}));
+
+		for (const prop of ["batch", "migrate"]) {
+			expect(() => wrapped.session[prop]([])).toThrow(
+				`blocked access to \`${prop}\` on a wrapped session`,
+			);
+		}
+		expect(sent).toEqual([]);
 	});
 
 	// -------------------------------------------------------------------
@@ -410,5 +742,30 @@ describe("withMiddleware (sqlite)", () => {
 		}
 
 		expect(sessionKinds).toEqual(EXPECTED_SESSION_KINDS);
+	});
+
+	test("every Drizzle SQLite session and prepared-query member is reviewed", () => {
+		const { unknown, overlap, leakyMethods, classNames, unparsed } =
+			reviewDrizzleSqliteMembers();
+		expect(unparsed).toEqual([]);
+
+		// The parser must find the drivers, or the checks below prove nothing.
+		for (const name of [
+			"SQLiteSession",
+			"SQLiteBunSession",
+			"LibSQLSession",
+			"SQLiteD1Session",
+			"LibSQLPreparedQuery",
+			"PrismaSQLitePreparedQuery",
+		])
+			expect(classNames).toContain(name);
+
+		// A new member must be added to the allowed or the denied list in
+		// src/sqlite-guard.ts after review. Until then the guard blocks it.
+		expect(unknown).toEqual([]);
+		expect(overlap).toEqual([]);
+		// An allowed method that is not intercepted must read only allowed
+		// members, so it cannot reach the driver.
+		expect(leakyMethods).toEqual([]);
 	});
 });

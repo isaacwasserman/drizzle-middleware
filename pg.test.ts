@@ -1,14 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
-import { entityKind, sql } from "drizzle-orm-beta";
+import { defineRelations, entityKind, eq, sql } from "drizzle-orm-beta";
 import { CasingCache } from "drizzle-orm-beta/casing";
+import { NeonHttpSession } from "drizzle-orm-beta/neon-http/session";
 import {
 	PgAsyncDatabase,
 	PgAsyncTransaction,
+	PgDialect,
 	integer,
 	pgTable,
 } from "drizzle-orm-beta/pg-core";
-import { type Middleware, withMiddleware } from "./src/pg.ts";
+import { PrismaPgSession } from "drizzle-orm-beta/prisma/pg/session";
+import {
+	PREPARED_ALLOWED,
+	PREPARED_DENIED,
+	SESSION_ALLOWED,
+	SESSION_DENIED,
+} from "./src/pg-guard.ts";
+import {
+	type Middleware,
+	executeBatchTransaction,
+	withMiddleware,
+} from "./src/pg.ts";
+import { fakePrisma } from "./test-helpers/fake-prisma.ts";
+import { reviewDrizzleMembers } from "./test-helpers/member-review.ts";
 
 type Log = string[];
 
@@ -117,6 +132,51 @@ function getCombinedPrepare(log: Log): string {
 	return entry;
 }
 
+// A copy of Drizzle's `PrismaPgDatabase` (the real module imports
+// `@prisma/client`). Its constructor builds its own session.
+class PrismaPgDatabase extends (PgAsyncDatabase as any) {
+	static readonly [entityKind] = "PrismaPgDatabase";
+	constructor(client: unknown) {
+		const dialect = new PgDialect();
+		super(
+			dialect,
+			new PrismaPgSession(dialect, client as any, {}),
+			{},
+			undefined,
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Member review for the fail-closed guard
+// ---------------------------------------------------------------------------
+
+function reviewDrizzlePgMembers() {
+	return reviewDrizzleMembers({
+		coreDir: "pg-core",
+		sessionBases: ["PgAsyncSession"],
+		preparedBases: ["PgAsyncPreparedQuery"],
+		// The Effect classes extend these directly and are not supported.
+		sessionAncestors: ["PgSession"],
+		preparedAncestors: ["PgBasePreparedQuery"],
+		session: {
+			allowed: SESSION_ALLOWED,
+			denied: SESSION_DENIED,
+			intercepted: new Set([
+				"prepareQuery",
+				"prepareRelationalQuery",
+				"prepareOneTimeRelationalQuery",
+				"transaction",
+			]),
+		},
+		prepared: {
+			allowed: PREPARED_ALLOWED,
+			denied: PREPARED_DENIED,
+			intercepted: new Set(["execute", "all", "values", "setToken"]),
+		},
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -128,13 +188,197 @@ describe("withMiddleware (pg)", () => {
 		expect(wrapped).not.toBe(db);
 	});
 
-	test("preserves $client and $cache", () => {
+	test("blocks $client and preserves $cache", () => {
 		const db = mockDb([]);
 		db.$client = { fake: "client" };
 		db.$cache = { fake: "cache" };
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.$client).toEqual({ fake: "client" });
+		expect(() => wrapped.$client).toThrow(
+			"blocked access to `$client` on a wrapped db",
+		);
 		expect(wrapped.$cache).toEqual({ fake: "cache" });
+		// The unwrapped db keeps its client, and a wrapped db can be wrapped.
+		expect(db.$client).toEqual({ fake: "client" });
+		expect(() => withMiddleware(wrapped, () => ({})).$client).toThrow(
+			"blocked access to `$client`",
+		);
+	});
+
+	test("keeps parseRqbJson of the input db and transaction", () => {
+		const relations = defineRelations({ users });
+		const db = new (PgAsyncDatabase as any)(
+			mockDialect,
+			createMockSession([]),
+			relations,
+			undefined,
+			true,
+		);
+		const tx = new (PgAsyncTransaction as any)(
+			mockDialect,
+			createMockSession([]),
+			relations,
+			undefined,
+			1,
+			true,
+		);
+
+		for (const input of [db, tx]) {
+			const wrapped = withMiddleware(input, () => ({})) as any;
+			expect(wrapped.query.users.parseJson).toBe(true);
+			// Stacked layers keep it too.
+			const stacked = withMiddleware(wrapped, () => ({})) as any;
+			expect(stacked.query.users.parseJson).toBe(true);
+		}
+		const plain = withMiddleware(
+			new (PgAsyncDatabase as any)(
+				mockDialect,
+				createMockSession([]),
+				relations,
+				undefined,
+			),
+			() => ({}),
+		) as any;
+		expect(plain.query.users.parseJson).toBe(false);
+	});
+
+	// -------------------------------------------------------------------
+	// Prisma: sequential transaction fallback
+	// -------------------------------------------------------------------
+
+	test("Prisma PG: runs each statement in order in a Prisma transaction", async () => {
+		const log: Log = [];
+		const db = new PrismaPgDatabase(fakePrisma(log)) as any;
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT set_config('app.tenant', ${"acme"}, true)`],
+			after: [sql`SELECT set_config('app.tenant', '', true)`],
+		})) as any;
+
+		// The wrapped db keeps the Prisma db class.
+		expect(wrapped).toBeInstanceOf(PrismaPgDatabase);
+		expect(await wrapped.select().from(users).where(eq(users.id, 7))).toEqual([
+			{ id: 1 },
+		]);
+		expect(log).toEqual([
+			"begin",
+			`tx: SELECT set_config('app.tenant', $1, true) ["acme"]`,
+			'tx: select "id" from "users" where "users"."id" = $1 [7]',
+			"tx: SELECT set_config('app.tenant', '', true)",
+			"commit",
+		]);
+	});
+
+	test("Prisma PG: stacked layers run in onion order", async () => {
+		const log: Log = [];
+		const db = new PrismaPgDatabase(fakePrisma(log)) as any;
+		const inner = withMiddleware(db, () => ({
+			before: [sql`SELECT 'inner before'`],
+			after: [sql`SELECT 'inner after'`],
+		}));
+		const outer = withMiddleware(inner, () => ({
+			before: [sql`SELECT 'outer before'`],
+			after: [sql`SELECT 'outer after'`],
+		})) as any;
+
+		await outer.execute(sql`SELECT 1`);
+		expect(log).toEqual([
+			"begin",
+			"tx: SELECT 'outer before'",
+			"tx: SELECT 'inner before'",
+			"tx: SELECT 1",
+			"tx: SELECT 'inner after'",
+			"tx: SELECT 'outer after'",
+			"commit",
+		]);
+	});
+
+	test("Prisma PG: a failed statement rolls back the whole envelope", async () => {
+		const log: Log = [];
+		const db = new PrismaPgDatabase(fakePrisma(log, "audit")) as any;
+		const wrapped = withMiddleware(db, () => ({
+			after: [sql`INSERT INTO audit VALUES (1)`],
+		})) as any;
+
+		// `execute()` returns a thenable; adopt it as a promise for `rejects`.
+		await expect(
+			Promise.resolve(wrapped.execute(sql`DELETE FROM users`)),
+		).rejects.toThrow("failed: audit");
+		expect(log).toEqual([
+			"begin",
+			"tx: DELETE FROM users",
+			"tx: INSERT INTO audit VALUES (1)",
+			"rollback",
+		]);
+	});
+
+	test("Prisma PG: no middleware runs the query directly", async () => {
+		const log: Log = [];
+		const db = new PrismaPgDatabase(fakePrisma(log)) as any;
+		const wrapped = withMiddleware(db, () => ({})) as any;
+
+		await wrapped.execute(sql`SELECT 1`);
+		expect(log).toEqual(["prisma: SELECT 1"]);
+	});
+
+	test("Prisma PG: executeBatchTransaction runs in a Prisma transaction", async () => {
+		const log: Log = [];
+		const db = new PrismaPgDatabase(fakePrisma(log)) as any;
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT 'before'`],
+		})) as any;
+
+		expect(
+			await executeBatchTransaction([
+				wrapped.select().from(users),
+				wrapped.select().from(users).where(eq(users.id, 2)),
+			]),
+		).toEqual([[{ id: 1 }], [{ id: 1 }]]);
+		// Without middleware, the queries still run one at a time.
+		await executeBatchTransaction([db.select().from(users)]);
+
+		expect(log).toEqual([
+			"begin",
+			"tx: SELECT 'before'",
+			'tx: select "id" from "users"',
+			'tx: select "id" from "users" where "users"."id" = $1 [2]',
+			"commit",
+			"begin",
+			'tx: select "id" from "users"',
+			"commit",
+		]);
+	});
+
+	test("rejects pg-proxy and Xata (no batch and no transactions)", () => {
+		const { PgRemoteSession } = require("drizzle-orm-beta/pg-proxy/session");
+		const { XataHttpSession } = require("drizzle-orm-beta/xata-http/session");
+		for (const [Session, kind] of [
+			[PgRemoteSession, "PgRemoteSession"],
+			[XataHttpSession, "XataHttpSession"],
+		]) {
+			const db = new (PgAsyncDatabase as any)(
+				mockDialect,
+				new Session(() => {}, mockDialect, {}, undefined, {}),
+				{},
+				undefined,
+			);
+			expect(() => withMiddleware(db, () => ({}))).toThrow(
+				`withMiddleware is not compatible with ${kind}`,
+			);
+		}
+	});
+
+	test("fails closed for a db class with its own constructor", () => {
+		// Like `PrismaPgDatabase`: the constructor builds its own session and
+		// ignores the session that withMiddleware passes.
+		class CustomDb extends (PgAsyncDatabase as any) {
+			static readonly [entityKind] = "CustomDb";
+			constructor(_client: unknown) {
+				super(mockDialect, createMockSession([]), {}, undefined);
+			}
+		}
+		const db = new CustomDb({});
+		expect(() => withMiddleware(db as any, () => ({}))).toThrow(
+			"cannot wrap CustomDb",
+		);
 	});
 
 	test("fast path: no before/after skips transaction", async () => {
@@ -450,13 +694,75 @@ describe("withMiddleware (pg)", () => {
 		expect(combined).toContain("set_config");
 	});
 
-	test("non-intercepted session properties pass through", () => {
+	// -------------------------------------------------------------------
+	// Fail-closed member guard
+	// -------------------------------------------------------------------
+
+	test("allowed session members pass through", () => {
 		const log: Log = [];
 		const db = mockDb(log);
+		db.session.dialect = mockDialect;
+		db.session.options = { logger: "x" };
+
+		const wrapped = withMiddleware(db, () => ({}));
+		expect(wrapped.session.options).toEqual({ logger: "x" });
+		expect(wrapped.session.dialect).toBe(mockDialect);
+	});
+
+	test("unknown session members are blocked", () => {
+		const log: Log = [];
+		const db = mockDb(log);
+		db.session.client = { query: () => log.push("client:query") };
 		db.session.customProp = "hello";
 
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.session.customProp).toBe("hello");
+		for (const prop of ["client", "customProp"]) {
+			expect(() => wrapped.session[prop]).toThrow(
+				`blocked access to \`${prop}\` on a wrapped session`,
+			);
+			expect(() =>
+				Object.getOwnPropertyDescriptor(wrapped.session, prop),
+			).toThrow(`blocked access to \`${prop}\``);
+		}
+		expect(log).toEqual([]);
+	});
+
+	test("unknown prepared-query members are blocked", () => {
+		const log: Log = [];
+		const db = mockDb(log);
+		const wrapped = withMiddleware(db, () => ({}));
+
+		const prepared = wrapped.session.prepareQuery({ sql: "SELECT 1" });
+		expect(() => prepared.executeRqbV2).toThrow(
+			"blocked access to `executeRqbV2` on a wrapped prepared query",
+		);
+		expect(() => prepared.client).toThrow("blocked access to `client`");
+		expect(prepared.joinsNotNullableMap).toBeUndefined();
+	});
+
+	test("NeonHttpSession.batch is blocked (it skips the middleware)", async () => {
+		const sent: string[] = [];
+		const client: any = (query: string) => {
+			sent.push(query);
+			return Promise.resolve({ rows: [], fields: [] });
+		};
+		client.query = client;
+		client.transaction = (queries: unknown[]) => Promise.all(queries);
+
+		const db = new (PgAsyncDatabase as any)(
+			mockDialect,
+			new NeonHttpSession(client, mockDialect as any, {} as any, undefined),
+			{},
+			undefined,
+		);
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`SELECT set_config('app.tenant', 'x', true)`],
+		}));
+
+		expect(() => wrapped.session.batch([])).toThrow(
+			"blocked access to `batch` on a wrapped session",
+		);
+		expect(sent).toEqual([]);
 	});
 
 	// -------------------------------------------------------------------
@@ -954,6 +1260,50 @@ describe("withMiddleware (pg)", () => {
 		);
 	}
 
+	test("PostgresJsTransaction: nested transaction (savepoint) runs the middleware", async () => {
+		const log: Log = [];
+		const session = createMockSession(log);
+		// postgres-js opens a savepoint on the transaction's `client`.
+		session.options = {};
+		session.client = {
+			savepoint: async (fn: (client: unknown) => Promise<unknown>) => {
+				log.push("savepoint");
+				const result = await fn({
+					unsafe: async (query: string) => {
+						log.push(`unsafe:${query}`);
+						return [];
+					},
+				});
+				log.push("release");
+				return result;
+			},
+		};
+		const {
+			PostgresJsTransaction,
+		} = require("drizzle-orm-beta/postgres-js/session");
+		const txDb = new PostgresJsTransaction(
+			mockDialect,
+			session,
+			undefined,
+			{},
+			0,
+		);
+
+		const wrapped = withMiddleware(txDb, () => ({
+			before: [sql`SELECT set_config('app.tenant', 'x', true)`],
+		}));
+		await wrapped.transaction(async (savepoint: any) => {
+			await savepoint.execute(sql`SELECT 1`);
+		});
+
+		expect(log).toEqual([
+			"savepoint",
+			"unsafe:SELECT set_config('app.tenant', 'x', true)",
+			"unsafe:SELECT 1",
+			"release",
+		]);
+	});
+
 	test("PostgresJsTransaction: detected as transaction input", () => {
 		const log: Log = [];
 		const txDb = mockPostgresJsTxDb(log);
@@ -1061,5 +1411,29 @@ describe("withMiddleware (pg)", () => {
 		}
 
 		expect(sessionKinds).toEqual(EXPECTED_SESSION_KINDS);
+	});
+
+	test("every Drizzle PG session and prepared-query member is reviewed", () => {
+		const { unknown, overlap, leakyMethods, classNames, unparsed } =
+			reviewDrizzlePgMembers();
+		expect(unparsed).toEqual([]);
+
+		// The parser must find the drivers, or the checks below prove nothing.
+		for (const name of [
+			"PgAsyncSession",
+			"NodePgSession",
+			"NeonHttpSession",
+			"PostgresJsPreparedQuery",
+			"PglitePreparedQuery",
+		])
+			expect(classNames).toContain(name);
+
+		// A new member must be added to the allowed or the denied list in
+		// src/pg-guard.ts after review. Until then the guard blocks it.
+		expect(unknown).toEqual([]);
+		expect(overlap).toEqual([]);
+		// An allowed method that is not intercepted must read only allowed
+		// members, so it cannot reach the driver.
+		expect(leakyMethods).toEqual([]);
 	});
 });

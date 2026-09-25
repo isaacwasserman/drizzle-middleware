@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
-import { eq, sql } from "drizzle-orm-beta";
+import { defineRelations, eq, sql } from "drizzle-orm-beta";
 import { integer, pgTable, serial, text } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
 import { type Middleware, withMiddleware } from "./src/pg.ts";
@@ -258,10 +258,11 @@ describe("e2e: pglite middleware", () => {
 		expect(rows).toEqual([{ name: "Leo", tenant: "acme" }]);
 	});
 
-	test("wrapped db preserves $client", async () => {
+	test("wrapped db blocks $client", async () => {
 		const db = await createTestDb();
 		const wrapped = withMiddleware(db, () => ({}));
-		expect(wrapped.$client).toBeInstanceOf(PGlite);
+		expect(() => wrapped.$client).toThrow("blocked access to `$client`");
+		expect(db.$client).toBeInstanceOf(PGlite);
 	});
 
 	test("join with duplicate column labels maps correctly through the batch", async () => {
@@ -353,5 +354,136 @@ describe("e2e: pglite middleware", () => {
 			{ key: "inner_after", value: "1" },
 			{ key: "outer_after", value: "1" },
 		]);
+	});
+});
+
+describe("e2e: pglite fail-closed guard", () => {
+	const posts = pgTable("posts", {
+		id: serial("id").primaryKey(),
+		userId: integer("user_id").notNull(),
+	});
+	const relations = defineRelations({ users, posts }, (r) => ({
+		users: { posts: r.many.posts({ from: r.users.id, to: r.posts.userId }) },
+	}));
+
+	async function createRelationalDb() {
+		const client = new PGlite();
+		const db = drizzle({ client, relations, schema: { users, posts } });
+		await db.execute(
+			sql`CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`,
+		);
+		await db.execute(
+			sql`CREATE TABLE posts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL)`,
+		);
+		await db.execute(sql`CREATE TABLE mw_log (n SERIAL)`);
+		await db.insert(users).values({ name: "Ada" });
+		await db.insert(posts).values({ userId: 1 });
+		return db;
+	}
+
+	async function middlewareRuns(
+		db: Awaited<ReturnType<typeof createRelationalDb>>,
+	) {
+		const result = await db.execute<{ n: number }>(
+			sql`SELECT count(*)::int AS n FROM mw_log`,
+		);
+		return result.rows[0]?.n;
+	}
+
+	test("blocks direct driver access through the wrapped session", async () => {
+		const db = await createRelationalDb();
+		const wrapped = withMiddleware(db, () => ({}));
+		const session = (wrapped as any).session;
+
+		expect(() => session.client).toThrow("blocked access to `client`");
+		expect(() => Object.getOwnPropertyDescriptor(session, "client")).toThrow(
+			"blocked access to `client`",
+		);
+	});
+
+	test("every supported query API still runs the middleware", async () => {
+		const db = await createRelationalDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+		}));
+
+		expect(
+			await wrapped.query.users.findMany({ with: { posts: true } }),
+		).toEqual([{ id: 1, name: "Ada", posts: [{ id: 1, userId: 1 }] }]);
+		expect(await wrapped.query.users.findFirst()).toEqual({
+			id: 1,
+			name: "Ada",
+		});
+		expect(await (wrapped as any)._query.users.findMany()).toEqual([
+			{ id: 1, name: "Ada" },
+		]);
+		const prepared = wrapped
+			.select()
+			.from(users)
+			.where(eq(users.id, sql.placeholder("id")))
+			.prepare("guard_select");
+		expect(await prepared.execute({ id: 1 })).toEqual([{ id: 1, name: "Ada" }]);
+		expect(await wrapped.$count(users)).toBe(1);
+		await wrapped.execute(sql`SELECT 1`);
+		expect(await middlewareRuns(db)).toBe(6);
+
+		// A transaction runs the middleware once, at its boundary.
+		await wrapped.transaction(async (tx) => {
+			await tx.query.users.findMany();
+			await tx.transaction(async (nested) => {
+				await nested.select().from(users);
+			});
+		});
+		expect(await middlewareRuns(db)).toBe(7);
+	});
+
+	test("nested transaction on a wrapped transaction runs the middleware", async () => {
+		const db = await createRelationalDb();
+
+		await db.transaction(async (tx) => {
+			const inner = withMiddleware(tx, () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			}));
+			const outer = withMiddleware(inner, () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			}));
+			await outer.transaction(async (savepoint) => {
+				await savepoint.insert(users).values({ name: "Kept" });
+			});
+			await expect(
+				outer.transaction(async (savepoint) => {
+					await savepoint.insert(users).values({ name: "Dropped" });
+					throw new Error("roll back the savepoint");
+				}),
+			).rejects.toThrow("roll back the savepoint");
+		});
+
+		expect(await db.select({ name: users.name }).from(users)).toEqual([
+			{ name: "Ada" },
+			{ name: "Kept" },
+		]);
+		// Both layers ran inside each savepoint. The rolled-back savepoint also
+		// rolled back its middleware rows.
+		expect(await middlewareRuns(db)).toBe(2);
+	});
+
+	test("stacked middleware on a transaction runs each layer once", async () => {
+		const db = await createRelationalDb();
+		const order: string[] = [];
+
+		await db.transaction(async (tx) => {
+			const inner = withMiddleware(tx, () => {
+				order.push("inner");
+				return { before: [sql`INSERT INTO mw_log DEFAULT VALUES`] };
+			});
+			const outer = withMiddleware(inner, () => {
+				order.push("outer");
+				return { before: [sql`INSERT INTO mw_log DEFAULT VALUES`] };
+			});
+			await outer.select().from(users);
+		});
+
+		expect(order).toEqual(["outer", "inner"]);
+		expect(await middlewareRuns(db)).toBe(2);
 	});
 });
