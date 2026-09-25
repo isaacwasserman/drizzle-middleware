@@ -8,12 +8,12 @@
 //   so each statement with parameters would wait a round trip for its types.
 // - postgres-js, `prepare: false`: values inlined by the strict encoder, so no
 //   statement has parameters and none waits for its types.
-// - Bun SQL: sequentially, in a transaction. Bun SQL 1.3 has no reliable
-//   one-round-trip mechanism: pipelined `unsafe()` calls get each other's
-//   results when statements with and without parameters are mixed; a
-//   pipelined batch in which a statement fails hangs once an earlier batch
-//   has run on the connection; with `prepare: false` it does not pipeline at
-//   all; and its multi-statement results have the wrong columns.
+// - Bun SQL 1.4+, `prepare: true`: tagged-template calls. Pipelined `unsafe()`
+//   calls take extra round trips; tagged calls pipeline fully.
+// - Bun SQL, `prepare: false`, or Bun before 1.4: sequentially, in a
+//   transaction. With `prepare: false`, Bun does not pipeline. Bun 1.3 gave
+//   pipelined queries the wrong results, and hung on a failing pipelined
+//   batch once an earlier batch had run on the connection.
 
 import {
 	BatchError,
@@ -31,6 +31,7 @@ import {
 	type Inference,
 	inlineParams,
 	postgresJsInference,
+	splitAtPlaceholders,
 } from "./pg-inline.js";
 import { drizzleAsyncTransaction } from "./transactions.js";
 
@@ -52,6 +53,10 @@ interface SqlClient {
 	): Query;
 }
 
+type TemplateStrings = readonly string[] & { readonly raw: readonly string[] };
+type TaggedClient = SqlClient &
+	((strings: TemplateStrings, ...values: readonly unknown[]) => Query);
+
 function asSqlClient(value: unknown): SqlClient {
 	if (typeof readMember(value, "unsafe") !== "function")
 		throw new TypeError(
@@ -61,7 +66,17 @@ function asSqlClient(value: unknown): SqlClient {
 	return value as SqlClient;
 }
 
-type SendMode = "prepared" | "inline";
+function asTaggedClient(value: unknown): TaggedClient {
+	const client = asSqlClient(value);
+	if (typeof client !== "function")
+		throw new TypeError(
+			"drizzle-middleware: the driver client is not a tagged-template function. This driver version is not supported.",
+		);
+	// Checked above: the client is callable and has `unsafe`.
+	return client as TaggedClient;
+}
+
+type SendMode = "prepared" | "inline" | "tagged";
 
 /**
  * A stand-in for the client's `unsafe()`. Drizzle calls `unsafe(sql, params)`
@@ -98,10 +113,18 @@ function query(
 	s: SqlCall,
 	mode: SendMode,
 ): PromiseLike<unknown> {
-	const q: Query =
-		mode === "prepared"
-			? asSqlClient(client).unsafe(s.sql, s.params, { prepare: true })
-			: asSqlClient(client).unsafe(s.sql, s.params);
+	let q: Query;
+	if (mode === "tagged") {
+		const strings = splitAtPlaceholders(s.sql, s.params.length);
+		const template: TemplateStrings = Object.assign([...strings], {
+			raw: [...strings],
+		});
+		q = asTaggedClient(client)(template, ...s.params);
+	} else if (mode === "prepared") {
+		q = asSqlClient(client).unsafe(s.sql, s.params, { prepare: true });
+	} else {
+		q = asSqlClient(client).unsafe(s.sql, s.params);
+	}
 	return s.mode === "values" ? q.values() : q;
 }
 
@@ -202,10 +225,19 @@ const POSTGRES_JS: DriverRules = {
 	mode: (client) => (prepareDisabled(client) ? "inline" : "prepared"),
 };
 
+/** True on Bun 1.4 or newer, where pipelined queries behave correctly. */
+function bunAtLeast14(): boolean {
+	const version = readMember(readMember(globalThis, "Bun"), "version");
+	if (typeof version !== "string") return false;
+	const [major = 0, minor = 0] = version.split(".").map(Number);
+	return major > 1 || (major === 1 && minor >= 4);
+}
+
 const BUN_SQL: DriverRules = {
 	sessionKind: "BunSQLSession",
 	inference: postgresJsInference,
-	mode: () => "sequential",
+	mode: (client) =>
+		prepareDisabled(client) || !bunAtLeast14() ? "sequential" : "tagged",
 };
 
 function entry(rules: DriverRules): DriverEntry {

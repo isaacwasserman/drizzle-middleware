@@ -31,11 +31,21 @@ const bunSqlite: DriverEntry = {
 	driverFor: () => drizzleSyncTransaction,
 };
 
+const betterSqlite3: DriverEntry = {
+	sessionKind: "BetterSQLiteSession",
+	dialect: "sqlite",
+	driverFor: () => drizzleSyncTransaction,
+};
+
 const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(
-	[nodePostgres, postgresJs, bunSqlPostgres, pglite, bunSqlite].map((entry) => [
-		entry.sessionKind,
-		entry,
-	]),
+	[
+		nodePostgres,
+		postgresJs,
+		bunSqlPostgres,
+		pglite,
+		bunSqlite,
+		betterSqlite3,
+	].map((entry) => [entry.sessionKind, entry]),
 );
 
 /** The session kinds that have a driver entry. */

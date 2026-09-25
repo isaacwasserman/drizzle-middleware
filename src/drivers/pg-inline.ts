@@ -180,3 +180,26 @@ export function inlineParams(
 	}
 	return out + sql.slice(last);
 }
+
+/**
+ * Splits `sql` at its placeholders, for a tagged-template call:
+ * `client(strings, ...params)`. The placeholders must be `$1`…`$n` in order,
+ * each once, as Drizzle writes them; otherwise this throws.
+ */
+export function splitAtPlaceholders(sql: string, paramCount: number): string[] {
+	const found = findPlaceholders(sql, paramCount);
+	found.forEach((p, i) => {
+		if (p.index !== i + 1)
+			throw new InlineError(
+				"the placeholders are not $1…$n in order, once each",
+			);
+	});
+	const strings: string[] = [];
+	let last = 0;
+	for (const p of found) {
+		strings.push(sql.slice(last, p.start));
+		last = p.end;
+	}
+	strings.push(sql.slice(last));
+	return strings;
+}

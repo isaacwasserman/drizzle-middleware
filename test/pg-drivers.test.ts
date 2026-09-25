@@ -94,7 +94,7 @@ const drivers: DriverCase[] = [
 	{
 		name: "Bun SQL",
 		sessionKind: "BunSQLSession",
-		oneRoundTrip: false,
+		oneRoundTrip: true,
 		connect: (u) => {
 			const client = new SQL({ url: u, max: 1 });
 			return { db: client, close: () => client.close() };

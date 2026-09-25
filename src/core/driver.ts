@@ -189,8 +189,11 @@ export const DRIVER_PLAN: Readonly<Record<SessionKind, DriverPlan>> = {
 		dialect: "pg",
 		strategies: ["pipelined-transaction", "pipelined-transaction-inline"],
 	},
-	// Bun SQL 1.3 has no reliable one-round-trip mechanism (src/drivers/postgres-js.ts).
-	BunSQLSession: { dialect: "pg", strategies: ["sequential"] },
+	// Tagged calls on Bun 1.4+ with `prepare: true`; sequential otherwise.
+	BunSQLSession: {
+		dialect: "pg",
+		strategies: ["pipelined-transaction", "sequential"],
+	},
 	NeonHttpSession: { dialect: "pg", strategies: ["batch-api"] },
 	PgliteSession: { dialect: "pg", strategies: ["local-transaction"] },
 	AwsDataApiSession: { dialect: "pg", strategies: ["sequential"] },

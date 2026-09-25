@@ -72,7 +72,8 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 | Netlify DB, WebSocket session | Pipeline, if its client is node-postgres compatible | No |
 | postgres-js, `prepare: true` | Pipelined transaction (`unsafe(sql, params, { prepare: true })`) | Yes (tests, real Postgres) |
 | postgres-js, `prepare: false` | Pipelined transaction, inline | Yes (tests, real Postgres) |
-| Bun SQL (either `prepare`) | Sequential. Bun SQL 1.3 has no reliable one-round-trip mechanism: pipelined queries with and without parameters get each other's results, a failing pipelined batch hangs once an earlier batch ran on the connection, it does not pipeline with `prepare: false`, and its multi-statement results have the wrong columns. | Yes (tests, real Postgres) |
+| Bun SQL 1.4+, `prepare: true` | Pipelined transaction (tagged-template calls; pipelined `unsafe()` calls take extra round trips) | Yes (tests, real Postgres) |
+| Bun SQL, `prepare: false`, or Bun before 1.4 | Sequential. With `prepare: false` Bun does not pipeline. Bun 1.3 gave pipelined queries wrong results and hung on a failing pipelined batch. | Yes (tests, real Postgres) |
 | neon-http | Batch API (`transaction([...])`, with the auth token) | No |
 | Netlify DB, HTTP session | Batch API (`httpClient.transaction`) | No |
 | PGlite | Local transaction | Existing e2e tests |
@@ -85,7 +86,8 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 
 | Driver | Strategy | Verified |
 |---|---|---|
-| bun:sqlite, better-sqlite3, node:sqlite, sql.js, Durable Objects, Expo | Local transaction (sync) | Existing e2e tests (bun:sqlite) |
+| bun:sqlite, better-sqlite3 | Local transaction (sync) | Yes (the SQLite e2e suite runs for both, under Bun 1.4) |
+| node:sqlite, sql.js, Durable Objects, Expo | Local transaction (sync) | No |
 
 Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
 | op-sqlite, Turso Database, Bun SQL SQLite | Local transaction | No |
