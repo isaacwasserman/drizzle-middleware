@@ -1,4 +1,4 @@
-// Contract: copied from the v1 suite (e2e-batched.test.ts). Only the imports changed.
+// Copied from the v1 suite (e2e-batched.test.ts). Only the imports changed.
 import { describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { eq, sql } from "drizzle-orm-beta";
@@ -10,10 +10,7 @@ import {
 	sqliteTable,
 	text as sqliteText,
 } from "drizzle-orm-beta/sqlite-core";
-import {
-	executeBatchTransaction,
-	withPgMiddleware as withMiddleware,
-} from "./impl.ts";
+import { executeBatchTransaction, withMiddleware } from "../src/v2/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),

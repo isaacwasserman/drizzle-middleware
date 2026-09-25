@@ -1,4 +1,4 @@
-// Contract: the applicable v1 unit tests (sqlite.test.ts), rewritten to check
+// the applicable v1 unit tests (sqlite.test.ts), rewritten to check
 // behavior on registered drivers instead of v1 internals. See MAPPING.md.
 
 import { describe, expect, spyOn, test } from "bun:test";
@@ -15,12 +15,10 @@ import {
 	text,
 } from "drizzle-orm-beta/sqlite-core";
 import { readMember } from "../src/internal/drizzle.ts";
-import { fakePrisma } from "../test-helpers/fake-prisma.ts";
-import {
-	executeBatchTransaction,
-	knownV1Bug,
-	withSqliteMiddleware as withMiddleware,
-} from "./impl.ts";
+import { executeBatchTransaction } from "../src/v2/pg.ts";
+import { withMiddleware } from "../src/v2/sqlite.ts";
+import { driverTest } from "./helpers/drivers.ts";
+import { fakePrisma } from "./helpers/fake-prisma.ts";
 
 const t = sqliteTable("t", { id: integer("id") });
 const log = sqliteTable("log", {
@@ -101,7 +99,7 @@ function fakeLibsqlDb(calls: string[], args: unknown[][] = []) {
 	);
 }
 
-describe("contract: withMiddleware (sqlite)", () => {
+describe("withMiddleware (sqlite)", () => {
 	// -------------------------------------------------------------------
 	// The wrapped db
 	// -------------------------------------------------------------------
@@ -211,58 +209,66 @@ describe("contract: withMiddleware (sqlite)", () => {
 	// libSQL
 	// -------------------------------------------------------------------
 
-	test("libSQL: a wrapped transaction runs every statement on it, in order", async () => {
-		const calls: string[] = [];
-		const db = fakeLibsqlDb(calls);
-		await db.transaction(async (tx: any) => {
-			// `LibSQLTransaction` subclasses `SQLiteTransaction`.
-			expect(tx.constructor[entityKind]).toBe("LibSQLTransaction");
-			const wrapped = withMiddleware(tx, () => ({
-				before: [sql`INSERT INTO kv VALUES ('tenant')`],
-				after: [sql`DELETE FROM kv`],
-			}));
-			await wrapped.select().from(t);
-		});
-		expect(calls).toEqual([
-			"tx: INSERT INTO kv VALUES ('tenant')",
-			'tx: select "id" from "t"',
-			"tx: DELETE FROM kv",
-			"tx: commit",
-		]);
-	});
-
-	test("libSQL: a nested transaction on a wrapped transaction runs the middleware", async () => {
-		const calls: string[] = [];
-		const db = fakeLibsqlDb(calls);
-		await db.transaction(async (tx: any) => {
-			const wrapped = withMiddleware(tx, () => ({
-				before: [sql`INSERT INTO kv VALUES ('tenant')`],
-			}));
-			await wrapped.transaction(async (savepoint: any) => {
-				await savepoint.select().from(t);
+	driverTest("LibSQLSession")(
+		"libSQL: a wrapped transaction runs every statement on it, in order",
+		async () => {
+			const calls: string[] = [];
+			const db = fakeLibsqlDb(calls);
+			await db.transaction(async (tx: any) => {
+				// `LibSQLTransaction` subclasses `SQLiteTransaction`.
+				expect(tx.constructor[entityKind]).toBe("LibSQLTransaction");
+				const wrapped = withMiddleware(tx, () => ({
+					before: [sql`INSERT INTO kv VALUES ('tenant')`],
+					after: [sql`DELETE FROM kv`],
+				}));
+				await wrapped.select().from(t);
 			});
-		});
-		expect(calls).toEqual([
-			"tx: savepoint sp0",
-			"tx: INSERT INTO kv VALUES ('tenant')",
-			'tx: select "id" from "t"',
-			"tx: release savepoint sp0",
-			"tx: commit",
-		]);
-	});
+			expect(calls).toEqual([
+				"tx: INSERT INTO kv VALUES ('tenant')",
+				'tx: select "id" from "t"',
+				"tx: DELETE FROM kv",
+				"tx: commit",
+			]);
+		},
+	);
 
-	test("libSQL: executeBatchTransaction on a transaction uses the transaction", async () => {
-		const calls: string[] = [];
-		const db = fakeLibsqlDb(calls);
-		await db.transaction(async (tx: any) => {
-			await executeBatchTransaction([tx.select().from(t)]);
-		});
-		expect(calls).toEqual(['tx: select "id" from "t"', "tx: commit"]);
-	});
+	driverTest("LibSQLSession")(
+		"libSQL: a nested transaction on a wrapped transaction runs the middleware",
+		async () => {
+			const calls: string[] = [];
+			const db = fakeLibsqlDb(calls);
+			await db.transaction(async (tx: any) => {
+				const wrapped = withMiddleware(tx, () => ({
+					before: [sql`INSERT INTO kv VALUES ('tenant')`],
+				}));
+				await wrapped.transaction(async (savepoint: any) => {
+					await savepoint.select().from(t);
+				});
+			});
+			expect(calls).toEqual([
+				"tx: savepoint sp0",
+				"tx: INSERT INTO kv VALUES ('tenant')",
+				'tx: select "id" from "t"',
+				"tx: release savepoint sp0",
+				"tx: commit",
+			]);
+		},
+	);
 
-	knownV1Bug(
+	driverTest("LibSQLSession")(
+		"libSQL: executeBatchTransaction on a transaction uses the transaction",
+		async () => {
+			const calls: string[] = [];
+			const db = fakeLibsqlDb(calls);
+			await db.transaction(async (tx: any) => {
+				await executeBatchTransaction([tx.select().from(t)]);
+			});
+			expect(calls).toEqual(['tx: select "id" from "t"', "tx: commit"]);
+		},
+	);
+
+	driverTest("LibSQLSession")(
 		"libSQL: raw all() returns the same result as the unwrapped db",
-		"the batch path returns the libSQL result set, not its rows",
 		async () => {
 			const plain = await fakeLibsqlDb([]).all(sql`select_query`);
 			const wrapped = withMiddleware(fakeLibsqlDb([]), () => ({
@@ -273,36 +279,41 @@ describe("contract: withMiddleware (sqlite)", () => {
 		},
 	);
 
-	test("libSQL: after-only middleware returns the query's rows", async () => {
-		const wrapped = withMiddleware(fakeLibsqlDb([]), () => ({
-			after: [sql`after_statement`],
-		})) as any;
-		const rows = await wrapped.select({ v: sql<string>`v` }).from(t);
-		expect(rows).toEqual([{ v: "select" }]);
-	});
+	driverTest("LibSQLSession")(
+		"libSQL: after-only middleware returns the query's rows",
+		async () => {
+			const wrapped = withMiddleware(fakeLibsqlDb([]), () => ({
+				after: [sql`after_statement`],
+			})) as any;
+			const rows = await wrapped.select({ v: sql<string>`v` }).from(t);
+			expect(rows).toEqual([{ v: "select" }]);
+		},
+	);
 
-	test("libSQL: each execution of a prepared query uses its own values", async () => {
-		const calls: string[] = [];
-		const args: unknown[][] = [];
-		const wrapped = withMiddleware(fakeLibsqlDb(calls, args), () => ({
-			before: [sql`before`],
-		})) as any;
-		const byId = wrapped
-			.select()
-			.from(t)
-			.where(eq(t.id, sql.placeholder("id")))
-			.prepare();
-		await byId.all({ id: 1 });
-		await byId.all({ id: 2 });
-		// v1 inlines the value into the SQL text; v2 sends it as an argument.
-		const seen = calls.map((c, i) => `${c} ${JSON.stringify(args[i])}`);
-		expect(seen.filter((s) => s.includes("1")).length).toBeGreaterThan(0);
-		expect(seen.filter((s) => s.includes("2")).length).toBeGreaterThan(0);
-	});
+	driverTest("LibSQLSession")(
+		"libSQL: each execution of a prepared query uses its own values",
+		async () => {
+			const calls: string[] = [];
+			const args: unknown[][] = [];
+			const wrapped = withMiddleware(fakeLibsqlDb(calls, args), () => ({
+				before: [sql`before`],
+			})) as any;
+			const byId = wrapped
+				.select()
+				.from(t)
+				.where(eq(t.id, sql.placeholder("id")))
+				.prepare();
+			await byId.all({ id: 1 });
+			await byId.all({ id: 2 });
+			// v1 inlines the value into the SQL text; v2 sends it as an argument.
+			const seen = calls.map((c, i) => `${c} ${JSON.stringify(args[i])}`);
+			expect(seen.filter((s) => s.includes("1")).length).toBeGreaterThan(0);
+			expect(seen.filter((s) => s.includes("2")).length).toBeGreaterThan(0);
+		},
+	);
 
-	knownV1Bug(
+	driverTest("LibSQLSession")(
 		"libSQL: values reach the driver as arguments, not in the SQL text",
-		"the batch path inlines values",
 		async () => {
 			const calls: string[] = [];
 			const args: unknown[][] = [];
@@ -317,9 +328,8 @@ describe("contract: withMiddleware (sqlite)", () => {
 		},
 	);
 
-	knownV1Bug(
+	driverTest("LibSQLSession")(
 		"libSQL: db.run after another query runs its own statement",
-		"a stale dialect capture replays the previous query",
 		async () => {
 			const calls: string[] = [];
 			const wrapped = withMiddleware(fakeLibsqlDb(calls), () => ({
@@ -333,48 +343,54 @@ describe("contract: withMiddleware (sqlite)", () => {
 		},
 	);
 
-	test("libSQL: batch and migrate are blocked (they skip the middleware)", () => {
-		const calls: string[] = [];
-		const wrapped = withMiddleware(fakeLibsqlDb(calls), () => ({
-			before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', 'x')`],
-		})) as any;
-		for (const prop of ["batch", "migrate"]) {
-			expect(() => wrapped.session[prop]([])).toThrow(
-				`blocked access to \`${prop}\``,
-			);
-		}
-		expect(calls).toEqual([]);
-	});
+	driverTest("LibSQLSession")(
+		"libSQL: batch and migrate are blocked (they skip the middleware)",
+		() => {
+			const calls: string[] = [];
+			const wrapped = withMiddleware(fakeLibsqlDb(calls), () => ({
+				before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', 'x')`],
+			})) as any;
+			for (const prop of ["batch", "migrate"]) {
+				expect(() => wrapped.session[prop]([])).toThrow(
+					`blocked access to \`${prop}\``,
+				);
+			}
+			expect(calls).toEqual([]);
+		},
+	);
 
 	// -------------------------------------------------------------------
 	// Prisma: sequential transaction
 	// -------------------------------------------------------------------
 
-	test("Prisma SQLite: runs each statement in order in a Prisma transaction", async () => {
-		const calls: string[] = [];
-		const dialect = new SQLiteAsyncDialect();
-		const db = new (BaseSQLiteDatabase as any)(
-			"async",
-			dialect,
-			new PrismaSQLiteSession(fakePrisma(calls) as any, dialect, {}),
-			{},
-			undefined,
-		);
-		const wrapped = withMiddleware(db, () => ({
-			before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', ${"acme"})`],
-			after: [sql`DELETE FROM kv`],
-		})) as any;
-		expect(await wrapped.select().from(t)).toEqual([{ id: 1 }]);
-		expect(await executeBatchTransaction([wrapped.select().from(t)])).toEqual([
-			[{ id: 1 }],
-		]);
-		const unit = [
-			"begin",
-			`tx: INSERT INTO kv (key, value) VALUES ('tenant', ?) ["acme"]`,
-			'tx: select "id" from "t"',
-			"tx: DELETE FROM kv",
-			"commit",
-		];
-		expect(calls).toEqual([...unit, ...unit]);
-	});
+	driverTest("PrismaSQLiteSession")(
+		"Prisma SQLite: runs each statement in order in a Prisma transaction",
+		async () => {
+			const calls: string[] = [];
+			const dialect = new SQLiteAsyncDialect();
+			const db = new (BaseSQLiteDatabase as any)(
+				"async",
+				dialect,
+				new PrismaSQLiteSession(fakePrisma(calls) as any, dialect, {}),
+				{},
+				undefined,
+			);
+			const wrapped = withMiddleware(db, () => ({
+				before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', ${"acme"})`],
+				after: [sql`DELETE FROM kv`],
+			})) as any;
+			expect(await wrapped.select().from(t)).toEqual([{ id: 1 }]);
+			expect(await executeBatchTransaction([wrapped.select().from(t)])).toEqual(
+				[[{ id: 1 }]],
+			);
+			const unit = [
+				"begin",
+				`tx: INSERT INTO kv (key, value) VALUES ('tenant', ?) ["acme"]`,
+				'tx: select "id" from "t"',
+				"tx: DELETE FROM kv",
+				"commit",
+			];
+			expect(calls).toEqual([...unit, ...unit]);
+		},
+	);
 });

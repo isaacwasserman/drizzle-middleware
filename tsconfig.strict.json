@@ -15,6 +15,6 @@
 		"src/internal/**/*.ts",
 		"src/drivers/**/*.ts",
 		"src/v2/**/*.ts",
-		"types.test-d.ts"
+		"test/types.test-d.ts"
 	]
 }

@@ -14,7 +14,7 @@ import {
 	hasQueryCache,
 	readMember,
 	sessionKindOf,
-} from "./src/internal/drizzle.ts";
+} from "../src/internal/drizzle.ts";
 
 class MemoryCache extends Cache {
 	static override readonly [entityKind]: string = "MemoryCache";

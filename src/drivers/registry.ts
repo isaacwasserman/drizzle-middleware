@@ -34,6 +34,11 @@ const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(
 	[nodePostgres, pglite, bunSqlite].map((entry) => [entry.sessionKind, entry]),
 );
 
+/** The session kinds that have a driver entry. */
+export const SUPPORTED_SESSION_KINDS: ReadonlySet<string> = new Set(
+	ENTRIES.keys(),
+);
+
 function planOf(kind: string): DriverPlan | undefined {
 	return Object.entries(DRIVER_PLAN).find(([k]) => k === kind)?.[1];
 }

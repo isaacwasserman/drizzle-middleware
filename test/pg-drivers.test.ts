@@ -1,9 +1,8 @@
-// Contract: the same behavior on every TCP Postgres driver, against a real
-// Postgres. Replaces the v1 mock tests for postgres-js (array mode, native
-// results, PostgresJsTransaction) and adds the round-trip check.
+// The same behavior on every TCP Postgres driver, against a real Postgres,
+// including the round-trip check.
 //
-// Runs only when CONTRACT_PG_URL is set, e.g.
-//   CONTRACT_PG_URL=postgres://postgres@127.0.0.1:5432/postgres bun test ./contract
+// Runs only when TEST_PG_URL is set, e.g.
+//   TEST_PG_URL=postgres://postgres@127.0.0.1:5432/postgres bun test
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { SQL } from "bun";
@@ -20,19 +19,20 @@ import {
 import { drizzle as postgresJs } from "drizzle-orm-beta/postgres-js";
 import pg from "pg";
 import postgres from "postgres";
-import { startLatencyProxy } from "../test-helpers/latency-proxy.ts";
-import { IMPL, withPgMiddleware as withMiddleware } from "./impl.ts";
+import type { SessionKind } from "../src/core/driver.ts";
+import { withMiddleware } from "../src/v2/pg.ts";
+import { driverDescribe } from "./helpers/drivers.ts";
+import { startLatencyProxy } from "./helpers/latency-proxy.ts";
 
-const url = process.env.CONTRACT_PG_URL;
+const url = process.env.TEST_PG_URL;
 const LATENCY_MS = 50;
 
 type Connected = { db: any; close(): Promise<void> };
 type DriverCase = {
 	name: string;
+	sessionKind: SessionKind;
 	/** `max: 1`, so session settings apply to the connection the query uses. */
 	connect(url: string): Connected;
-	/** Audit findings that v1 fails on this driver. */
-	v1Bugs: string[];
 };
 
 function makeTables(schemaName: string) {
@@ -60,22 +60,23 @@ function makeTables(schemaName: string) {
 const drivers: DriverCase[] = [
 	{
 		name: "node-postgres",
+		sessionKind: "NodePgSession",
 		connect: (u) => {
 			const pool = new pg.Pool({ connectionString: u, max: 1 });
 			return { db: pool, close: () => pool.end() };
 		},
-		v1Bugs: ["injection", "bytea"],
 	},
 	{
 		name: "postgres-js (prepare: true)",
+		sessionKind: "PostgresJsSession",
 		connect: (u) => {
 			const client = postgres(u, { max: 1, onnotice: () => {} });
 			return { db: client, close: () => client.end() };
 		},
-		v1Bugs: ["injection", "bytea", "results by position"],
 	},
 	{
 		name: "postgres-js (prepare: false)",
+		sessionKind: "PostgresJsSession",
 		connect: (u) => {
 			const client = postgres(u, {
 				max: 1,
@@ -84,15 +85,14 @@ const drivers: DriverCase[] = [
 			});
 			return { db: client, close: () => client.end() };
 		},
-		v1Bugs: ["injection", "bytea", "results by position"],
 	},
 	{
 		name: "Bun SQL",
+		sessionKind: "BunSQLSession",
 		connect: (u) => {
 			const client = new SQL({ url: u, max: 1 });
 			return { db: client, close: () => client.close() };
 		},
-		v1Bugs: ["injection", "bytea"],
 	},
 ];
 
@@ -104,87 +104,73 @@ function drizzleFor(driver: DriverCase, client: unknown, relations: unknown) {
 	return bunSql({ client: client as any, relations: relations as any });
 }
 
-const describeIfPg = url ? describe : describe.skip;
-
 for (const driver of drivers) {
-	describeIfPg(`contract: ${driver.name}`, () => {
-		const schemaName = `contract_${driver.name.replace(/\W+/g, "_")}_${Date.now()}`;
-		const t = makeTables(schemaName);
-		let connected: Connected;
-		let db: any;
+	(url ? driverDescribe(driver.sessionKind) : describe.skip)(
+		driver.name,
+		() => {
+			const schemaName = `test_${driver.name.replace(/\W+/g, "_")}_${Date.now()}`;
+			const t = makeTables(schemaName);
+			let connected: Connected;
+			let db: any;
 
-		const contractTest = (
-			name: string,
-			fn: () => Promise<void>,
-			v1Bug?: string,
-		) => {
-			if (
-				IMPL === "v1" &&
-				v1Bug &&
-				driver.v1Bugs.includes(v1Bug) &&
-				!process.env.CONTRACT_SHOW_V1_BUGS
-			)
-				test.failing(`${name} [v1 bug: ${v1Bug}]`, fn);
-			else test(name, fn);
-		};
-		const insertLog = (v: string) =>
-			sql`insert into ${t.log} (v) values (${v})`;
-		const logged = async () =>
-			(await db.select({ v: t.log.v }).from(t.log).orderBy(t.log.n)).map(
-				(r: { v: string }) => r.v,
-			);
+			const insertLog = (v: string) =>
+				sql`insert into ${t.log} (v) values (${v})`;
+			const logged = async () =>
+				(await db.select({ v: t.log.v }).from(t.log).orderBy(t.log.n)).map(
+					(r: { v: string }) => r.v,
+				);
 
-		beforeAll(async () => {
-			connected = driver.connect(url as string);
-			db = drizzleFor(driver, connected.db, t.relations);
-			await db.execute(sql.raw(`create schema "${schemaName}"`));
-			await db.execute(
-				sql.raw(
-					`create table "${schemaName}".users (id serial primary key, name text not null)`,
-				),
-			);
-			await db.execute(
-				sql.raw(
-					`create table "${schemaName}".posts (id serial primary key, user_id integer not null, name text)`,
-				),
-			);
-			await db.execute(
-				sql.raw(
-					`create table "${schemaName}".log (n serial primary key, v text)`,
-				),
-			);
-			await db.execute(
-				sql.raw(
-					`create table "${schemaName}".files (id serial primary key, data bytea)`,
-				),
-			);
-			await db.execute(sql.raw(`create table "${schemaName}".victims (x int)`));
-		});
-		afterAll(async () => {
-			await db.execute(sql.raw(`drop schema "${schemaName}" cascade`));
-			await connected.close();
-		});
-		const reset = async () => {
-			await db.execute(
-				sql.raw(
-					`truncate "${schemaName}".users, "${schemaName}".posts, "${schemaName}".log, "${schemaName}".files restart identity`,
-				),
-			);
-		};
+			beforeAll(async () => {
+				connected = driver.connect(url as string);
+				db = drizzleFor(driver, connected.db, t.relations);
+				await db.execute(sql.raw(`create schema "${schemaName}"`));
+				await db.execute(
+					sql.raw(
+						`create table "${schemaName}".users (id serial primary key, name text not null)`,
+					),
+				);
+				await db.execute(
+					sql.raw(
+						`create table "${schemaName}".posts (id serial primary key, user_id integer not null, name text)`,
+					),
+				);
+				await db.execute(
+					sql.raw(
+						`create table "${schemaName}".log (n serial primary key, v text)`,
+					),
+				);
+				await db.execute(
+					sql.raw(
+						`create table "${schemaName}".files (id serial primary key, data bytea)`,
+					),
+				);
+				await db.execute(
+					sql.raw(`create table "${schemaName}".victims (x int)`),
+				);
+			});
+			afterAll(async () => {
+				await db.execute(sql.raw(`drop schema "${schemaName}" cascade`));
+				await connected.close();
+			});
+			const reset = async () => {
+				await db.execute(
+					sql.raw(
+						`truncate "${schemaName}".users, "${schemaName}".posts, "${schemaName}".log, "${schemaName}".files restart identity`,
+					),
+				);
+			};
 
-		contractTest("before, the query, and after run in order", async () => {
-			await reset();
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("before")],
-				after: [insertLog("after")],
-			}));
-			await wrapped.execute(insertLog("query"));
-			expect(await logged()).toEqual(["before", "query", "after"]);
-		});
+			test("before, the query, and after run in order", async () => {
+				await reset();
+				const wrapped = withMiddleware(db, () => ({
+					before: [insertLog("before")],
+					after: [insertLog("after")],
+				}));
+				await wrapped.execute(insertLog("query"));
+				expect(await logged()).toEqual(["before", "query", "after"]);
+			});
 
-		contractTest(
-			"a failing after statement rolls back the whole unit",
-			async () => {
+			test("a failing after statement rolls back the whole unit", async () => {
 				await reset();
 				const wrapped = withMiddleware(db, () => ({
 					before: [insertLog("before")],
@@ -195,12 +181,9 @@ for (const driver of drivers) {
 				).rejects.toThrow();
 				expect(await logged()).toEqual([]);
 				expect(await db.select().from(t.users)).toEqual([]);
-			},
-		);
+			});
 
-		contractTest(
-			"transaction-local state reaches the query and is gone after",
-			async () => {
+			test("transaction-local state reaches the query and is gone after", async () => {
 				const wrapped = withMiddleware(db, () => ({
 					before: [sql`select set_config('app.tenant', ${"acme"}, true)`],
 				}));
@@ -212,12 +195,9 @@ for (const driver of drivers) {
 					sql`select coalesce(current_setting('app.tenant', true), '') as v`,
 				);
 				expect(Array.from(after.rows ?? after)[0]).toMatchObject({ v: "" });
-			},
-		);
+			});
 
-		contractTest(
-			"several before statements, some without rows, keep the query's result",
-			async () => {
+			test("several before statements, some without rows, keep the query's result", async () => {
 				await reset();
 				await db.insert(t.users).values({ name: "Ada" });
 				const wrapped = withMiddleware(db, () => ({
@@ -229,13 +209,9 @@ for (const driver of drivers) {
 				expect(
 					await wrapped.select({ name: t.users.name }).from(t.users),
 				).toEqual([{ name: "Ada" }]);
-			},
-			"results by position",
-		);
+			});
 
-		contractTest(
-			"an after statement that returns rows does not replace the query's result",
-			async () => {
+			test("an after statement that returns rows does not replace the query's result", async () => {
 				await reset();
 				await db.insert(t.users).values({ name: "Ada" });
 				const wrapped = withMiddleware(db, () => ({
@@ -245,19 +221,18 @@ for (const driver of drivers) {
 				expect(
 					await wrapped.select({ name: t.users.name }).from(t.users),
 				).toEqual([{ name: "Ada" }]);
-			},
-		);
+			});
 
-		contractTest("$count returns the count (positional rows)", async () => {
-			await reset();
-			await db.insert(t.users).values([{ name: "Ada" }, { name: "Bob" }]);
-			const wrapped = withMiddleware(db, () => ({ before: [insertLog("b")] }));
-			expect(await wrapped.$count(t.users)).toBe(2);
-		});
+			test("$count returns the count (positional rows)", async () => {
+				await reset();
+				await db.insert(t.users).values([{ name: "Ada" }, { name: "Bob" }]);
+				const wrapped = withMiddleware(db, () => ({
+					before: [insertLog("b")],
+				}));
+				expect(await wrapped.$count(t.users)).toBe(2);
+			});
 
-		contractTest(
-			"raw execute returns the same rows as the unwrapped db",
-			async () => {
+			test("raw execute returns the same rows as the unwrapped db", async () => {
 				await reset();
 				await db.insert(t.users).values({ name: "Ada" });
 				const query = sql`select id, name from ${t.users}`;
@@ -268,12 +243,9 @@ for (const driver of drivers) {
 				expect(Array.from(wrapped.rows ?? wrapped)).toEqual(
 					Array.from(plain.rows ?? plain),
 				);
-			},
-		);
+			});
 
-		contractTest(
-			"a join with duplicate column labels maps correctly",
-			async () => {
+			test("a join with duplicate column labels maps correctly", async () => {
 				await reset();
 				await db.insert(t.users).values({ name: "Ada" });
 				await db.insert(t.posts).values({ userId: 1, name: "post" });
@@ -286,25 +258,24 @@ for (const driver of drivers) {
 						.from(t.users)
 						.innerJoin(t.posts, eq(t.posts.userId, t.users.id)),
 				).toEqual([{ user: "Ada", post: "post" }]);
-			},
-		);
+			});
 
-		contractTest("a relational query runs the middleware", async () => {
-			await reset();
-			await db.insert(t.users).values({ name: "Ada" });
-			await db.insert(t.posts).values({ userId: 1, name: "post" });
-			const wrapped = withMiddleware(db, () => ({ before: [insertLog("b")] }));
-			expect(
-				await wrapped.query.users.findMany({
-					with: { posts: { columns: { name: true } } },
-				}),
-			).toEqual([{ id: 1, name: "Ada", posts: [{ name: "post" }] }]);
-			expect(await logged()).toEqual(["b"]);
-		});
+			test("a relational query runs the middleware", async () => {
+				await reset();
+				await db.insert(t.users).values({ name: "Ada" });
+				await db.insert(t.posts).values({ userId: 1, name: "post" });
+				const wrapped = withMiddleware(db, () => ({
+					before: [insertLog("b")],
+				}));
+				expect(
+					await wrapped.query.users.findMany({
+						with: { posts: { columns: { name: true } } },
+					}),
+				).toEqual([{ id: 1, name: "Ada", posts: [{ name: "post" }] }]);
+				expect(await logged()).toEqual(["b"]);
+			});
 
-		contractTest(
-			"a wrapped open transaction runs before and after around each query, in it",
-			async () => {
+			test("a wrapped open transaction runs before and after around each query, in it", async () => {
 				await reset();
 				await expect(
 					db.transaction(async (tx: any) => {
@@ -318,12 +289,9 @@ for (const driver of drivers) {
 					}),
 				).rejects.toThrow("roll back");
 				expect(await logged()).toEqual([]);
-			},
-		);
+			});
 
-		contractTest(
-			"a nested transaction on a wrapped open transaction runs the middleware",
-			async () => {
+			test("a nested transaction on a wrapped open transaction runs the middleware", async () => {
 				await reset();
 				await db.transaction(async (tx: any) => {
 					const wrapped = withMiddleware(tx, () => ({
@@ -334,12 +302,9 @@ for (const driver of drivers) {
 					});
 				});
 				expect(await logged()).toEqual(["before", "in savepoint"]);
-			},
-		);
+			});
 
-		contractTest(
-			"a value cannot inject SQL, even with standard_conforming_strings off",
-			async () => {
+			test("a value cannot inject SQL, even with standard_conforming_strings off", async () => {
 				await reset();
 				await db.execute(sql`set standard_conforming_strings = off`);
 				try {
@@ -357,13 +322,9 @@ for (const driver of drivers) {
 					),
 				);
 				expect(Array.from(table.rows ?? table)[0]).toMatchObject({ ok: true });
-			},
-			"injection",
-		);
+			});
 
-		contractTest(
-			"bytea values keep every byte",
-			async () => {
+			test("bytea values keep every byte", async () => {
 				await reset();
 				const data = Buffer.from([0, 1, 39, 92, 255]);
 				const [row] = await withMiddleware(db, () => ({
@@ -373,13 +334,9 @@ for (const driver of drivers) {
 					.values({ data })
 					.returning();
 				expect(Buffer.from(row.data)).toEqual(data);
-			},
-			"bytea",
-		);
+			});
 
-		contractTest(
-			"a wrapped query with middleware takes one round trip",
-			async () => {
+			test("a wrapped query with middleware takes one round trip", async () => {
 				const target = new URL(url as string);
 				const proxy = await startLatencyProxy(
 					{ host: target.hostname, port: Number(target.port || 5432) },
@@ -413,8 +370,7 @@ for (const driver of drivers) {
 					await slow.close();
 					await proxy.close();
 				}
-			},
-			"results by position",
-		);
-	});
+			});
+		},
+	);
 }

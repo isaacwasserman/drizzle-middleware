@@ -132,6 +132,18 @@ function guard<T extends object>(
 
 const NOT_INTERCEPTED: unique symbol = Symbol("not intercepted");
 
+/** Session members that the wrapped session replaces. */
+export const SESSION_INTERCEPTED: ReadonlySet<string> = new Set([
+	"prepareQuery",
+	"prepareRelationalQuery",
+	"transaction",
+]);
+
+/** Prepared-query members that the wrapped prepared query replaces. */
+export function preparedIntercepted(rules: DialectRules): ReadonlySet<string> {
+	return new Set([...rules.execMethods, "setToken"]);
+}
+
 function wrapPrepared(
 	state: WrapState,
 	prepareMethod: PrepareMethod,

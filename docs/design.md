@@ -97,7 +97,7 @@ Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqli
 | SQLite Cloud | Sequential | No |
 | Prisma SQLite | Sequential (`$transaction`) | Fake client only |
 
-A driver counts as supported only when a contract test runs against the real driver (section 11).
+A driver counts as supported only when its tests run against the real driver (section 11).
 
 ## 6. Values
 
@@ -149,7 +149,7 @@ A driver counts as supported only when a contract test runs against the real dri
 
 ## 11. Tests
 
-1. **Contract tests** for each driver entry, against the real driver: Postgres in CI (service container) for node-postgres, postgres-js and Bun SQL; the Neon wsproxy container for neon-serverless; local libSQL; PGlite; bun:sqlite; Bun SQL SQLite. Each checks the guarantees in section 3 and the round-trip count (through a latency proxy).
+1. **Real-driver tests** for each driver entry, against the real driver: Postgres in CI (service container) for node-postgres, postgres-js and Bun SQL; the Neon wsproxy container for neon-serverless; local libSQL; PGlite; bun:sqlite; Bun SQL SQLite. Each checks the guarantees in section 3 and the round-trip count (through a latency proxy).
 2. **Security regression suite.** Each audit finding becomes a test:
    - replay of a previous query after `toSQL()` or a batch;
    - SQL injection with `standard_conforming_strings = off`;
@@ -160,7 +160,7 @@ A driver counts as supported only when a contract test runs against the real dri
    - `db.batch()` and `session.migrate()` skipping the middleware.
 3. **Member review** (kept from v1).
 4. **Encoder fuzz test** (section 6).
-5. **The contract suite** (`contract/`): the v1 e2e suites (copied), the applicable v1 unit tests (rewritten as behavior tests), the real-driver tests, and the security suite. `contract/MAPPING.md` accounts for every v1 test. It runs against v1 today through `contract/impl.ts`, with the known v1 bugs marked as expected failures, and v2 must pass all of it.
+5. **The v1 tests**, copied (e2e) or rewritten as behavior tests (unit), in `test/`. `test/MAPPING.md` accounts for every v1 test. All tests run against v2; tests for a driver without a registry entry are `test.todo` until the entry lands.
 
 ## 12. Open questions
 

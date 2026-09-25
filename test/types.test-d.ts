@@ -15,15 +15,15 @@ import {
 	type Driver,
 	assertNever,
 	batchDriver,
-} from "./src/core/driver.ts";
+} from "../src/core/driver.ts";
 import type {
 	BatchResults,
 	Middleware,
 	PgDb,
 	SqliteDb,
 	WithMiddleware,
-} from "./src/core/types.ts";
-import type { DrizzleSession } from "./src/internal/drizzle.ts";
+} from "../src/core/types.ts";
+import type { DrizzleSession } from "../src/internal/drizzle.ts";
 
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 function assertType<T extends true>(_value?: T): void {}

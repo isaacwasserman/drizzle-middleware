@@ -1,16 +1,13 @@
-# Contract suite: where each v1 test went
+# Where each v1 test went
 
-The contract suite is the behavior that v2 must keep. It imports the
-implementation from `impl.ts`, so the same tests run against v1 today and
-against v2 later.
+The v1 tests were copied or rewritten for v2. This file accounts for every one
+of them. All tests in `test/` run against v2 (`src/v2/`).
 
-- **Known v1 bugs** (`knownV1Bug`, or a `v1Bug` label in `pg-drivers.test.ts`)
-  run as `test.failing` on v1. They must pass on v2. Run with
-  `CONTRACT_SHOW_V1_BUGS=1` to see why each one fails on v1.
+- **Drivers without a registry entry yet:** their tests are `test.todo` (see
+  `helpers/drivers.ts`). They become normal tests when the driver's entry lands.
 - **Error messages:** tests check stable fragments only: the driver kind,
-  `not compatible with`, `blocked access to \`<member>\``, `cannot wrap`. v2
-  must keep these fragments.
-- **Real drivers:** `pg-drivers.test.ts` runs only when `CONTRACT_PG_URL` is set.
+  `not compatible with`, `blocked access to \`<member>\``, `cannot wrap`.
+- **Real drivers:** `pg-drivers.test.ts` runs only when `TEST_PG_URL` is set.
 
 ## Files
 
@@ -19,7 +16,9 @@ against v2 later.
 | `e2e-pg.test.ts`, `e2e-sqlite.test.ts`, `e2e-batched.test.ts` | The v1 e2e suites, copied. Only the imports changed. |
 | `pg.test.ts`, `sqlite.test.ts` | The applicable v1 unit tests, rewritten to check behavior on registered drivers. |
 | `pg-drivers.test.ts` | node-postgres, postgres-js (`prepare: true` / `false`) and Bun SQL against a real Postgres. |
-| `security.test.ts` | The audit findings. |
+| `security.test.ts` | The v1 audit findings. |
+| `guard-members.test.ts` | The review of the guard member lists (from the v1 unit tests). |
+| `driver-plan.test.ts`, `internal-drizzle.test.ts`, `types.test-d.ts` | v2 only: the driver plan, the Drizzle boundary, the types. |
 
 ## e2e suites (47 tests): copied
 
@@ -28,7 +27,7 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 
 ## pg.test.ts (55 tests)
 
-| v1 test | Contract |
+| v1 test | Now in |
 |---|---|
 | returns a new db instance | `pg`: same name |
 | blocks $client and preserves $cache | `pg`: blocks $client. The `$cache` check is dropped: v2 rejects a db with a cache. |
@@ -47,7 +46,7 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 | before query params are inlined | Not applicable (v2 keeps values as parameters). Intent: `pg`: query values reach the database unchanged; `security`. |
 | inlineSql does not leak shouldInlineParams onto middleware SQL | `pg`: middleware SQL objects can be reused unchanged |
 | inner query params are inlined via dialect capture | `pg`: query values reach the database unchanged |
-| setToken is forwarded to the batched prepared query | `pg`: neon-http: the auth token reaches the driver (known v1 bug) |
+| setToken is forwarded to the batched prepared query | `pg`: neon-http: the auth token reaches the driver  |
 | joinsNotNullableMap is copied to the batched prepared query | `pg`: a left join without a match maps the joined table to null |
 | placeholder values are resolved and inlined into concatenated query | `pg`: a prepared query with placeholders runs with each set of values |
 | placeholder query uses single round trip, not tx fallback | `pg-drivers`: a wrapped query with middleware takes one round trip |
@@ -83,18 +82,18 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 | PostgresJsTransaction: before + inner + after, correct order | As above. |
 | PostgresJsTransaction: no explicit tx opened (no tx:begin) | As above (the outer rollback removes everything). |
 | PostgresJsTransaction: relational query also works | As above (the test runs `findMany`). |
-| covers every PG session in drizzle-orm-beta | `../driver-plan.test.ts` |
-| every Drizzle PG session and prepared-query member is reviewed | Stays: the member review of the guard lists. |
+| covers every PG session in drizzle-orm-beta | `driver-plan` |
+| every Drizzle PG session and prepared-query member is reviewed | `guard-members`: same name (for Postgres) |
 
 ## sqlite.test.ts (23 tests)
 
-| v1 test | Contract |
+| v1 test | Now in |
 |---|---|
 | returns a new db instance | `sqlite`: same name |
 | blocks $client and preserves $cache | `sqlite`: blocks $client (the `$cache` check is dropped, as for pg) |
 | fast path: no before/after skips transaction | `sqlite`: no middleware: the query runs directly, without a transaction |
 | before + inner concatenated into one statement | Not applicable (v1 internal). |
-| params use ? syntax (SQLite), not $N (PG) | Not applicable (v1 inlining). Intent: `sqlite`: libSQL: values reach the driver as arguments (known v1 bug). |
+| params use ? syntax (SQLite), not $N (PG) | Not applicable (v1 inlining). Intent: `sqlite`: libSQL: values reach the driver as arguments . |
 | inner query params are inlined via dialect capture | `sqlite`: libSQL: each execution of a prepared query uses its own values |
 | standalone: 3 before + inner + 3 after = 1 prepareQuery call | Not applicable (v1 internal count). |
 | user tx: before/after run individually | `e2e-sqlite`: user transaction: before/after run at boundaries |
@@ -111,10 +110,10 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 | LibSQLSession.batch and migrate are blocked | `sqlite`: libSQL: batch and migrate are blocked |
 | placeholder values are resolved and inlined into concatenated query | `sqlite`: libSQL: each execution of a prepared query uses its own values |
 | after-only: inner result is extracted from multi-statement response | `sqlite`: libSQL: after-only middleware returns the query's rows |
-| covers every SQLite session in drizzle-orm-beta | `../driver-plan.test.ts` |
-| every Drizzle SQLite session and prepared-query member is reviewed | Stays: the member review of the guard lists. |
+| covers every SQLite session in drizzle-orm-beta | `driver-plan` |
+| every Drizzle SQLite session and prepared-query member is reviewed | `guard-members`: same name (for SQLite) |
 
-## New contract tests (not in v1)
+## New tests (not in v1)
 
 - `security.test.ts`: every audit finding.
 - `pg-drivers.test.ts`: the whole file (real drivers, including injection,
@@ -122,7 +121,7 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 - `sqlite.test.ts`: libSQL raw `all()` result, values as arguments, no replay
   after another query; a wrapped open bun:sqlite transaction.
 
-## Known v1 bugs found while writing the contract
+## v1 bugs found while writing these tests
 
 These were not in the audit:
 

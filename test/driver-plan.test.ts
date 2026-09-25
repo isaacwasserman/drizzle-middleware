@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { DRIVER_PLAN, type SessionKind } from "./src/core/driver.ts";
+import { DRIVER_PLAN, type SessionKind } from "../src/core/driver.ts";
 
 // Abstract base classes, not drivers.
 const BASE_KINDS = new Set([

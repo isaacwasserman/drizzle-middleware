@@ -42,7 +42,7 @@ jobs:
     test:
         runs-on: ubuntu-latest
         services:
-            # For the real-driver contract (contract/pg-drivers.test.ts).
+            # For the real-driver tests (test/pg-drivers.test.ts).
             postgres:
                 image: postgres:16
                 env:
@@ -55,7 +55,7 @@ jobs:
                     --health-timeout 5s
                     --health-retries 10
         env:
-            CONTRACT_PG_URL: postgres://postgres@localhost:5432/postgres
+            TEST_PG_URL: postgres://postgres@localhost:5432/postgres
         steps:
             - uses: actions/checkout@v4
 
