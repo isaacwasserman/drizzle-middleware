@@ -38,7 +38,7 @@ The package cannot check what the middleware statements do. Session-level state 
 | A query on `withMiddleware(tx)` (an open transaction) | `before`, the query, `after`, inside that transaction. There is no new transaction; atomicity comes from the outer one. |
 | A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. |
 
-Because `before` goes out with the first query of a transaction, `setTransaction()` can still run first.
+`setTransaction()` on a wrapped transaction runs without middleware, as the first statement, because Postgres rejects `SET TRANSACTION` after any other statement. It is a transaction-control statement and reads no data; this is a reviewed exception. Because `before` goes out with the first query of a transaction, the order stays valid.
 
 ## 5. Driver registry
 
@@ -87,6 +87,8 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 | Driver | Strategy | Verified |
 |---|---|---|
 | bun:sqlite, better-sqlite3, node:sqlite, sql.js, Durable Objects, Expo | Local transaction (sync) | Existing e2e tests (bun:sqlite) |
+
+Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
 | op-sqlite, Turso Database, Bun SQL SQLite | Local transaction | No |
 | libSQL | Batch API (`batch` / `tx.batch`) | Fake client only |
 | Cloudflare D1 | Batch API (`batch`) | No |
@@ -158,7 +160,7 @@ A driver counts as supported only when a contract test runs against the real dri
    - `db.batch()` and `session.migrate()` skipping the middleware.
 3. **Member review** (kept from v1).
 4. **Encoder fuzz test** (section 6).
-5. **Behavior tests** ported from the v1 e2e suites (pglite, bun:sqlite, sqlite-proxy, batched).
+5. **The contract suite** (`contract/`): the v1 e2e suites (copied), the applicable v1 unit tests (rewritten as behavior tests), the real-driver tests, and the security suite. `contract/MAPPING.md` accounts for every v1 test. It runs against v1 today through `contract/impl.ts`, with the known v1 bugs marked as expected failures, and v2 must pass all of it.
 
 ## 12. Open questions
 

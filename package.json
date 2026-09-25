@@ -23,7 +23,7 @@
 		"prepare": "git config core.hooksPath .githooks",
 		"build": "tsc -p tsconfig.build.json && bun scripts/fix-beta-imports.ts",
 		"test": "bun test",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.strict.json && bun scripts/check-unsafe.ts",
 		"lint": "biome check .",
 		"format": "biome format --write ."
 	},
@@ -38,7 +38,10 @@
 		"@changesets/cli": "^2.30.0",
 		"@electric-sql/pglite": "^0.5.7",
 		"@types/bun": "latest",
+		"@types/pg": "^8.23.1",
 		"drizzle-orm-beta": "^1.0.0-beta.22",
+		"pg": "^8.23.0",
+		"postgres": "^3.4.9",
 		"typescript": "7"
 	},
 	"peerDependencies": {

@@ -29,6 +29,19 @@
 			}
 		},
 		{
+			"include": ["src/core/**/*.ts", "src/internal/**/*.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noNonNullAssertion": "error"
+					},
+					"suspicious": {
+						"noExplicitAny": "error"
+					}
+				}
+			}
+		},
+		{
 			"include": ["**/*.test.ts"],
 			"linter": {
 				"rules": {
