@@ -36,11 +36,26 @@ export interface BatchDriverSpec<TCall, TResult> {
 		session: DrizzleSession,
 		recorder: Recorder<TCall, TResult>,
 	): DrizzleSession;
-	/** Sends the calls as one atomic unit. Returns one result per call, in order. */
+	/**
+	 * Sends the calls as one atomic unit. Returns one result per call, in
+	 * order. If one statement fails, rejects with a `BatchError` that names it.
+	 */
 	send(
 		session: DrizzleSession,
 		calls: readonly TCall[],
 	): Promise<readonly TResult[]>;
+}
+
+/** A batch failed at statement `index`; the database rolled back the unit. */
+export class BatchError extends Error {
+	readonly index: number;
+	constructor(index: number, cause: unknown) {
+		super(`drizzle-middleware: statement ${index + 1} of the batch failed`, {
+			cause,
+		});
+		this.name = "BatchError";
+		this.index = index;
+	}
 }
 
 /**

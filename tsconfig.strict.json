@@ -10,5 +10,11 @@
 		"declaration": true,
 		"allowJs": false
 	},
-	"include": ["src/core/**/*.ts", "src/internal/**/*.ts", "types.test-d.ts"]
+	"include": [
+		"src/core/**/*.ts",
+		"src/internal/**/*.ts",
+		"src/drivers/**/*.ts",
+		"src/v2/**/*.ts",
+		"types.test-d.ts"
+	]
 }

@@ -29,7 +29,12 @@
 			}
 		},
 		{
-			"include": ["src/core/**/*.ts", "src/internal/**/*.ts"],
+			"include": [
+				"src/core/**/*.ts",
+				"src/internal/**/*.ts",
+				"src/drivers/**/*.ts",
+				"src/v2/**/*.ts"
+			],
 			"linter": {
 				"rules": {
 					"style": {
