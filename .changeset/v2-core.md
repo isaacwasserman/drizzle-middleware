@@ -6,7 +6,7 @@ New execution core. The middleware now fails closed: if it cannot run your state
 
 **Guarantees.** For every unit (`before`, the queries, `after`): the statements run in order, in one transaction, on one connection, and a failure rolls back the whole unit. Values stay parameters, and Drizzle maps every result itself.
 
-**Supported drivers:** node-postgres, postgres-js, Bun SQL (Postgres), PGlite, bun:sqlite and better-sqlite3. node-postgres, postgres-js and Bun SQL 1.4+ (with `prepare: true`) send a unit in one round trip. Every other driver throws.
+**Supported drivers:** node-postgres, postgres-js, Bun SQL (Postgres and SQLite), PGlite, bun:sqlite and better-sqlite3. node-postgres, postgres-js and Bun SQL 1.4+ (with `prepare: true`) send a unit in one round trip. Every other driver throws.
 
 **New:**
 

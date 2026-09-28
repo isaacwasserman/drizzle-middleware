@@ -1,6 +1,6 @@
 # drizzle-middleware v2: design and semantics
 
-Status: implemented for the first release (node-postgres, postgres-js, Bun SQL Postgres, PGlite, bun:sqlite, better-sqlite3). The other drivers in section 5 are planned; `withMiddleware` throws for them.
+Status: implemented for the first release (node-postgres, postgres-js, Bun SQL Postgres, PGlite, bun:sqlite, better-sqlite3, Bun SQL SQLite). The other drivers in section 5 are planned; `withMiddleware` throws for them.
 
 ## 1. Goals
 
@@ -88,15 +88,18 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 |---|---|---|
 | bun:sqlite, better-sqlite3 | Local transaction (sync) | Yes (the SQLite e2e suite runs for both, under Bun 1.4) |
 | node:sqlite, sql.js, Durable Objects, Expo | Local transaction (sync) | No |
-
-Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
-| op-sqlite, Turso Database, Bun SQL SQLite | Local transaction | No |
+| Bun SQL SQLite | Local transaction, one unit at a time for each client | Yes (e2e and concurrency tests) |
+| op-sqlite, Turso Database | Local transaction | No |
 | libSQL | Batch API (`batch` / `tx.batch`) | Fake client only |
 | Cloudflare D1 | Batch API (`batch`) | No |
 | sqlite-proxy with a batch callback | Batch API (the batch callback) | No |
 | sqlite-proxy without a batch callback | Sequential (`begin` … `commit`) | Yes (e2e, bun:sqlite backend) |
 | SQLite Cloud | Sequential | No |
 | Prisma SQLite | Sequential (`$transaction`) | Fake client only |
+
+Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
+
+Note: Bun SQL SQLite has one connection, and it does not queue transactions. A `begin` while a transaction is open throws, and a query sent while a transaction is open runs in that transaction. So the package queues all work on a client from its wrapped dbs: a unit, a `transaction(fn)` scope or a query without middleware starts only when the earlier one has ended. Work inside a transaction does not wait. Queries on the unwrapped db do not go through the queue.
 
 A driver counts as supported only when its tests run against the real driver (section 11).
 

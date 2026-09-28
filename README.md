@@ -25,6 +25,7 @@ Requires `drizzle-orm` **1.0.0-beta.22**, the version the tests run against.
 | Bun SQL, `prepare: false`, or Bun before 1.4 | One statement at a time, in a transaction | 1 per statement |
 | PGlite | A local transaction | In-process |
 | bun:sqlite, better-sqlite3 | A native sync transaction | In-process |
+| Bun SQL (SQLite) | A transaction, one statement at a time; one unit at a time for each client | In-process |
 
 Any other driver throws when you wrap it.
 
@@ -133,6 +134,7 @@ The `tx` inside `db.transaction(fn)` has the brand too.
 - **node-postgres:** `pg` is an optional peer dependency, loaded only when you wrap a node-postgres db.
 - **postgres-js:** with `prepare: true`, the first run of each query text on a connection costs about one extra round trip per statement, while postgres-js learns the parameter types. After that, it is one round trip.
 - **Bun SQL:** one round trip needs Bun 1.4 or newer and `prepare: true` (the default).
+- **Bun SQL (SQLite):** the client has one connection, and it does not queue transactions itself. The package queues all work that goes through wrapped dbs on the same client, so a query cannot join a transaction that another unit has open. Queries on the unwrapped db do not go through this queue: while a wrapped unit or `transaction(fn)` is open, they can run inside it. Inside `wrapped.transaction(fn)`, use `tx`, not the wrapped db; a query on the wrapped db waits for the transaction to end, so the two wait for each other.
 
 ## How it works
 

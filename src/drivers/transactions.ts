@@ -8,6 +8,7 @@ import {
 	DrizzleInternalsError,
 	type DrizzleSession,
 	asDrizzleDb,
+	readMember,
 } from "../internal/drizzle.js";
 
 const noCallback = () =>
@@ -31,6 +32,33 @@ export function drizzleAsyncTransaction(
 			});
 			if (box.result === undefined) throw noCallback();
 			return box.result.value;
+		},
+	};
+}
+
+/** The tail of each client's queue. */
+const queues = new WeakMap<object, Promise<unknown>>();
+
+/**
+ * Like `drizzleAsyncTransaction("local-transaction")`, for a client with one
+ * connection that does not queue transactions: work on the client runs one
+ * item at a time, in call order.
+ */
+export function serializedAsyncTransaction(): AsyncTransactionDriver {
+	return {
+		...drizzleAsyncTransaction("local-transaction"),
+		serialize<T>(session: DrizzleSession, body: () => Promise<T>): Promise<T> {
+			const client = readMember(session, "client");
+			// A Bun SQL client is a function (a tagged template).
+			if (
+				client === null ||
+				(typeof client !== "object" && typeof client !== "function")
+			)
+				throw new DrizzleInternalsError("the session has no client");
+			const result = (queues.get(client) ?? Promise.resolve()).then(body);
+			const settled = () => undefined;
+			queues.set(client, result.then(settled, settled));
+			return result;
 		},
 	};
 }

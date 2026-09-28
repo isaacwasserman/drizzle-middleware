@@ -225,6 +225,22 @@ function target(state: WrapState) {
 const isSync = (state: WrapState) =>
 	state.driver.kind === "transaction" && state.driver.mode === "sync";
 
+/**
+ * Runs `body` alone on the connection, when the driver needs that. Work
+ * inside a transaction is already alone, and waiting there would deadlock.
+ */
+function exclusive(state: WrapState, body: () => unknown): unknown {
+	const { driver } = state;
+	if (
+		state.inTransaction ||
+		driver.kind !== "transaction" ||
+		driver.mode !== "async" ||
+		driver.serialize === undefined
+	)
+		return body();
+	return driver.serialize(state.session, async () => body());
+}
+
 function first(values: unknown[] | Promise<unknown[]>): unknown {
 	return values instanceof Promise ? values.then((v) => v[0]) : values[0];
 }
@@ -236,15 +252,17 @@ function runQuery(
 	item: QueryItem,
 ): unknown {
 	const direct = () => runExec(raw, item.execMethod, item.execArgs);
-	return withScope(state, (scopeBefore) => {
-		const own = collectStatements(state.layers);
-		const statements: Statements = {
-			before: [...scopeBefore, ...own.before],
-			after: own.after,
-		};
-		if (isEmpty(statements)) return direct();
-		return first(runUnit(target(state), statements, [item]));
-	});
+	return exclusive(state, () =>
+		withScope(state, (scopeBefore) => {
+			const own = collectStatements(state.layers);
+			const statements: Statements = {
+				before: [...scopeBefore, ...own.before],
+				after: own.after,
+			};
+			if (isEmpty(statements)) return direct();
+			return first(runUnit(target(state), statements, [item]));
+		}),
+	);
 }
 
 /**
@@ -288,28 +306,30 @@ function runTransaction(
 			[],
 		);
 	};
-	return state.session.transaction((rawTx) => {
-		const txDb = asDrizzleDb(rawTx);
-		const scoped = wrapDb(txDb, {
-			...state,
-			session: txDb.session,
-			rawDb: txDb,
-			layers: [],
-			scope,
-			inTransaction: true,
-		});
-		if (isSync(state)) {
-			const result = fn(scoped);
-			finish(txDb.session);
-			return result;
-		}
-		return (async () => {
-			const result = await fn(scoped);
-			if (scope.beforeDone instanceof Promise) await scope.beforeDone;
-			await finish(txDb.session);
-			return result;
-		})();
-	}, config);
+	return exclusive(state, () =>
+		state.session.transaction((rawTx) => {
+			const txDb = asDrizzleDb(rawTx);
+			const scoped = wrapDb(txDb, {
+				...state,
+				session: txDb.session,
+				rawDb: txDb,
+				layers: [],
+				scope,
+				inTransaction: true,
+			});
+			if (isSync(state)) {
+				const result = fn(scoped);
+				finish(txDb.session);
+				return result;
+			}
+			return (async () => {
+				const result = await fn(scoped);
+				if (scope.beforeDone instanceof Promise) await scope.beforeDone;
+				await finish(txDb.session);
+				return result;
+			})();
+		}, config),
+	);
 }
 
 // -----------------------------------------------------------------------
@@ -381,14 +401,16 @@ export function executeBatchTransactionWith(
 	const items = queries.map((q) =>
 		collectItem(q, state.session, state.config.rules),
 	);
-	const result = withScope(state, (scopeBefore) => {
-		const own = collectStatements(state.layers);
-		return runUnit(
-			target(state),
-			{ before: [...scopeBefore, ...own.before], after: own.after },
-			items,
-		);
-	});
+	const result = exclusive(state, () =>
+		withScope(state, (scopeBefore) => {
+			const own = collectStatements(state.layers);
+			return runUnit(
+				target(state),
+				{ before: [...scopeBefore, ...own.before], after: own.after },
+				items,
+			);
+		}),
+	);
 	return Promise.resolve(result).then((values) =>
 		Array.isArray(values) ? values : [],
 	);

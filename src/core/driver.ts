@@ -106,6 +106,15 @@ export interface AsyncTransactionDriver {
 		session: DrizzleSession,
 		body: (txSession: DrizzleSession) => Promise<T>,
 	): Promise<T>;
+	/**
+	 * Set for a driver with one connection that does not queue its
+	 * transactions. Runs `body` after all earlier work on the same client, so
+	 * no query joins a transaction that another unit has open.
+	 */
+	readonly serialize?: <T>(
+		session: DrizzleSession,
+		body: () => Promise<T>,
+	) => Promise<T>;
 }
 
 /** A driver that cannot give the guarantees; `withMiddleware` throws. */

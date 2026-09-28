@@ -17,6 +17,7 @@ import { bunSqlPostgres, postgresJs } from "./postgres-js.js";
 import {
 	drizzleAsyncTransaction,
 	drizzleSyncTransaction,
+	serializedAsyncTransaction,
 } from "./transactions.js";
 
 const pglite: DriverEntry = {
@@ -37,6 +38,18 @@ const betterSqlite3: DriverEntry = {
 	driverFor: () => drizzleSyncTransaction,
 };
 
+// Bun SQL with the SQLite adapter: in-process and async. Its multi-statement
+// calls skip a failing statement and are not atomic, so a unit runs in
+// Drizzle's own transaction (`client.begin`), one statement at a time. It has
+// one connection and does not queue transactions: a concurrent `begin` throws,
+// and a concurrent query joins the open transaction. So the client's work
+// runs one item at a time.
+const bunSqlSqlite: DriverEntry = {
+	sessionKind: "BunSQLiteSession",
+	dialect: "sqlite",
+	driverFor: () => serializedAsyncTransaction(),
+};
+
 const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(
 	[
 		nodePostgres,
@@ -45,6 +58,7 @@ const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(
 		pglite,
 		bunSqlite,
 		betterSqlite3,
+		bunSqlSqlite,
 	].map((entry) => [entry.sessionKind, entry]),
 );
 
