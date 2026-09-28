@@ -69,12 +69,11 @@ await db.transaction(async (tx) => {
 
 In `db.transaction(fn)`, the factory is called once for the transaction. `before` goes out with the first query, and `after` goes out before the commit. `tx` is wrapped too, and nested transactions (savepoints) keep the middleware.
 
-You can also wrap a transaction that is already open. Then `before` and `after` run around each query in it:
+`withMiddleware` accepts a db, not a transaction. Most drivers do not show when a transaction has ended, so a wrapped transaction that you keep after its end could run queries outside it, or inside another request's transaction on the same connection. Wrap the db, and open the transaction on the wrapped db:
 
 ```ts
-await baseDb.transaction(async (tx) => {
-  const wrapped = withMiddleware(tx, middleware);
-  await wrapped.select().from(users); // before, query, after
+await withMiddleware(baseDb, middleware).transaction(async (tx) => {
+  await tx.select().from(users);
 });
 ```
 
@@ -126,6 +125,7 @@ The `tx` inside `db.transaction(fn)` has the brand too.
 ## What throws
 
 - A driver that is not in the table above.
+- A transaction passed to `withMiddleware`. Pass the db.
 - A db with a Drizzle query cache. A cache key has no middleware context, so a cached result could reach a caller whose middleware gives a different result.
 - `db.$client` on a wrapped db. A query sent on the driver client does not run the middleware. Use the unwrapped db's `$client` if you need the driver.
 - Drizzle APIs that send queries without the middleware, such as `db.batch()`, or any other member that the package has not reviewed.
@@ -135,7 +135,6 @@ The `tx` inside `db.transaction(fn)` has the brand too.
 
 - **node-postgres:** `pg` is an optional peer dependency, loaded only when you wrap a node-postgres db.
 - **postgres-js:** with `prepare: true`, the first run of each query text on a connection costs about one extra round trip per statement, while postgres-js learns the parameter types. After that, it is one round trip.
-- **postgres-js, `prepare: false`, and a wrapped open transaction:** a postgres-js transaction client does not show the `prepare` setting, so `withMiddleware(tx)` keeps the values as parameters. Each statement with parameters then costs one extra round trip. `wrapped.transaction(fn)` does not have this cost: it uses the setting of the wrapped db.
 - **Bun SQL:** one round trip needs Bun 1.4 or newer and `prepare: true` (the default).
 - **Bun SQL (SQLite):** the client has one connection, and it does not queue transactions itself. The package queues all work that goes through wrapped dbs on the same client, so a query cannot join a transaction that another unit has open. Queries on the unwrapped db do not go through this queue: while a wrapped unit or `transaction(fn)` is open, they can run inside it. Inside `wrapped.transaction(fn)`, use `tx`, not the wrapped db; a query on the wrapped db waits for the transaction to end, so the two wait for each other.
 

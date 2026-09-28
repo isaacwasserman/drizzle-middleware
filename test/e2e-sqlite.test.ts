@@ -68,18 +68,5 @@ for (const driver of SYNC_DRIVERS) {
 				).toThrow(TypeError);
 			});
 		});
-
-		// The driver's `inTransaction` shows that the raw transaction has ended.
-		test("a wrapped raw transaction kept after its end cannot send queries", () => {
-			const db = createDb();
-			let kept: any;
-			db.transaction((tx) => {
-				kept = withMiddleware(tx, middleware);
-			});
-			expect(() => kept.select().from(users).all()).toThrow(
-				"the transaction has ended",
-			);
-			expect(middlewareRuns(db)).toBe(0);
-		});
 	});
 }

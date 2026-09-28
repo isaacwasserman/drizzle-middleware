@@ -92,12 +92,11 @@ describe("security", () => {
 		expect((await withLog(db).execute(query)).rows).toEqual(plain.rows);
 	});
 
-	test("setTransaction() on a wrapped open transaction runs first, without middleware", async () => {
+	test("setTransaction() in wrapped.transaction runs first, without middleware", async () => {
 		const { db } = await createDb();
-		await db.transaction(async (tx) => {
-			const wrapped = withLog(tx);
-			await wrapped.setTransaction({ isolationLevel: "serializable" });
-			const level = await wrapped.execute<{ level: string }>(
+		await withLog(db).transaction(async (tx) => {
+			await tx.setTransaction({ isolationLevel: "serializable" });
+			const level = await tx.execute<{ level: string }>(
 				sql`select current_setting('transaction_isolation') as level`,
 			);
 			expect(level.rows[0]?.level).toBe("serializable");

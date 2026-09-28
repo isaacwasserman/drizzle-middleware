@@ -10,7 +10,7 @@ import { SQLITE_CONFIG } from "./dialects.js";
 export type { BatchResults, Middleware, WithMiddleware };
 export { executeBatchTransaction } from "./pg.js";
 
-/** Wraps a SQLite Drizzle db (or open transaction) with middleware. */
+/** Wraps a SQLite Drizzle db with middleware. A transaction throws. */
 export function withMiddleware<TDb>(
 	db: SqliteDb<TDb>,
 	middleware: Middleware,

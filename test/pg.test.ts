@@ -13,7 +13,6 @@ import {
 	text,
 } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
-import { PgliteTransaction } from "drizzle-orm-beta/pglite/session";
 import { asDrizzleDialect, readMember } from "../src/internal/drizzle.ts";
 import { withMiddleware } from "../src/pg.ts";
 
@@ -64,7 +63,7 @@ describe("withMiddleware (pg)", () => {
 	// The wrapped db
 	// -------------------------------------------------------------------
 
-	test("keeps parseRqbJson of the input db and transaction", async () => {
+	test("keeps parseRqbJson of the input db", async () => {
 		const { db } = await createDb();
 		const dialect = readMember(db, "dialect");
 		const session = readMember(db, "session");
@@ -75,20 +74,10 @@ describe("withMiddleware (pg)", () => {
 			undefined,
 			true,
 		);
-		const flaggedTx = new PgliteTransaction(
-			dialect as any,
-			session as any,
-			relations,
-			undefined,
-			1,
-			true,
-		);
-		for (const input of [flaggedDb, flaggedTx]) {
-			const wrapped = withMiddleware(input, () => ({})) as any;
-			expect(wrapped.query.users.parseJson).toBe(true);
-			const stacked = withMiddleware(wrapped, () => ({})) as any;
-			expect(stacked.query.users.parseJson).toBe(true);
-		}
+		const wrapped = withMiddleware(flaggedDb, () => ({})) as any;
+		expect(wrapped.query.users.parseJson).toBe(true);
+		const stacked = withMiddleware(wrapped, () => ({})) as any;
+		expect(stacked.query.users.parseJson).toBe(true);
 		expect((withMiddleware(db, () => ({})) as any).query.users.parseJson).toBe(
 			false,
 		);
@@ -232,43 +221,16 @@ describe("withMiddleware (pg)", () => {
 		expect(level).toBe("serializable");
 	});
 
-	describe("a wrapped open transaction (tx input)", () => {
-		test("the result is the query's, not the middleware's", async () => {
-			const { db } = await createDb();
-			await db.insert(users).values({ name: "Ada" });
-			await db.transaction(async (tx) => {
-				const wrapped = withMiddleware(tx, () => ({
-					before: [sql`select 'before' as name`],
-					after: [sql`select 'after' as name`],
-				}));
-				expect(await wrapped.select({ name: users.name }).from(users)).toEqual([
-					{ name: "Ada" },
-				]);
-			});
+	// Most drivers do not show when a transaction ends, so a wrapped
+	// transaction could send units after its end. The types reject a
+	// transaction too; this is for callers without types.
+	test("rejects a transaction, raw or from a wrapped db", async () => {
+		const { db } = await createDb();
+		await db.transaction(async (tx) => {
+			expect(() => withMiddleware(tx as never, () => ({}))).toThrow(TypeError);
 		});
-
-		test("no new transaction is opened", async () => {
-			const { client, db } = await createDb();
-			const transaction = spyOn(client, "transaction");
-			await db.transaction(async (tx) => {
-				const wrapped = withMiddleware(tx, () => ({
-					before: [insertLog("b")],
-				}));
-				await wrapped.select().from(users);
-			});
-			expect(transaction).toHaveBeenCalledTimes(1);
-		});
-
-		test("no middleware: the query runs directly", async () => {
-			const { db } = await createDb();
-			await db.insert(users).values({ name: "Ada" });
-			await db.transaction(async (tx) => {
-				const wrapped = withMiddleware(tx, () => ({}));
-				expect(await wrapped.select().from(users)).toEqual([
-					{ id: 1, name: "Ada" },
-				]);
-			});
-			expect(await logged(db)).toEqual([]);
+		await withMiddleware(db, () => ({})).transaction(async (tx) => {
+			expect(() => withMiddleware(tx as never, () => ({}))).toThrow(TypeError);
 		});
 	});
 

@@ -12,7 +12,7 @@ import { CONFIGS, PG_CONFIG } from "./dialects.js";
 
 export type { BatchResults, Middleware, WithMiddleware };
 
-/** Wraps a Postgres Drizzle db (or open transaction) with middleware. */
+/** Wraps a Postgres Drizzle db with middleware. A transaction throws. */
 export function withMiddleware<TDb>(
 	db: PgDb<TDb>,
 	middleware: Middleware,

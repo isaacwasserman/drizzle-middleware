@@ -68,7 +68,7 @@ interface Scope {
 interface WrapState {
 	readonly config: DialectConfig;
 	readonly driver: Driver;
-	/** The real session: the db's, or the open transaction's. */
+	/** The real session: the db's, or its transaction's in `wrapped.transaction(fn)`. */
 	readonly session: DrizzleSession;
 	/**
 	 * The unwrapped db or transaction that owns `session`. Savepoints and
@@ -596,8 +596,14 @@ export function withMiddlewareWith(
 			"drizzle-middleware: the middleware must be a function that returns { before?: SQL[]; after?: SQL[] }",
 		);
 	const db = asDrizzleDb(input);
+	// Most drivers do not show when a transaction ends. A wrapped transaction
+	// kept after its end would send units outside it, or into another
+	// request's transaction on the same connection.
+	if (extendsEntityKind(db, config.transactionKind))
+		throw new TypeError(
+			"drizzle-middleware: withMiddleware accepts a db, not a transaction. Wrap the db, and open the transaction on the wrapped db: withMiddleware(db, middleware).transaction(fn).",
+		);
 	const inner = stateOf(db.session);
-	const isTransaction = extendsEntityKind(db, config.transactionKind);
 	const session = inner?.session ?? asDrizzleSession(db.session);
 	if (inner === undefined && hasQueryCache(session))
 		throw new TypeError(
@@ -609,8 +615,8 @@ export function withMiddlewareWith(
 		session,
 		rawDb: inner?.rawDb ?? db,
 		layers: [middleware, ...(inner?.layers ?? [])],
-		scope: inner?.scope,
-		inTransaction: (inner?.inTransaction ?? false) || isTransaction,
+		scope: undefined,
+		inTransaction: false,
 	};
 	return wrapDb(db, state);
 }

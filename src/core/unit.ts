@@ -95,7 +95,7 @@ export interface QueryItem {
 
 export interface UnitTarget {
 	readonly driver: Driver;
-	/** The real session: the db's, or the open transaction's. */
+	/** The real session: the db's, or its transaction's in `wrapped.transaction(fn)`. */
 	readonly session: DrizzleSession;
 	/** True when `session` is already inside a transaction. */
 	readonly inTransaction: boolean;
@@ -166,10 +166,11 @@ export function runUnit(
 			if (driver.mode === "sync") {
 				const body = (session: DrizzleSession) =>
 					steps.map((step) => step(session));
-				if (!target.inTransaction)
-					return pick(driver.run(target.session, body));
-				if (!driver.isOpen(target.session)) throw transactionEnded();
-				return pick(body(target.session));
+				return pick(
+					target.inTransaction
+						? body(target.session)
+						: driver.run(target.session, body),
+				);
 			}
 			const body = async (session: DrizzleSession) => {
 				const values: unknown[] = [];

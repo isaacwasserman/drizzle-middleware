@@ -541,87 +541,34 @@ for (const driver of drivers) {
 			expect(await logged()).toEqual(["before"]);
 		});
 
-		test("a wrapped open transaction runs before and after around each query, in it", async () => {
-			await reset();
-			const middleware = () => ({
-				before: [insertLog("before")],
-				after: [insertLog("after")],
-			});
-			const rollBack = new Error("roll back the outer transaction");
-			const inside = driver.sync
-				? () =>
-						expect(() =>
-							db.transaction((tx: any) => {
-								withMiddleware(tx, middleware).run(insertLog("query"));
-								expect(
-									tx.select({ v: t.log.v }).from(t.log).all(),
-								).toHaveLength(3);
-								throw rollBack;
-							}),
-						).toThrow(rollBack)
-				: () =>
-						expect(
-							db.transaction(async (tx: any) => {
-								const wrapped = withMiddleware(tx, middleware);
-								await (driver.dialect === "pg"
-									? wrapped.execute(insertLog("query"))
-									: wrapped.run(insertLog("query")));
-								expect(await logged(tx)).toEqual(["before", "query", "after"]);
-								throw rollBack;
-							}),
-						).rejects.toThrow(rollBack);
-			await inside();
-			// Everything ran inside the outer transaction, and rolled back.
-			expect(await logged()).toEqual([]);
-		});
-
-		test("stacked middleware on an open transaction runs each layer once", async () => {
-			await reset();
-			const body = (tx: any) => {
-				const inner = withMiddleware(tx, () => ({
-					before: [insertLog("inner")],
-				}));
-				const outer = withMiddleware(inner, () => ({
-					before: [insertLog("outer")],
-				}));
-				return outer.select().from(t.users);
-			};
-			if (driver.sync) db.transaction((tx: any) => body(tx).all());
-			else await db.transaction(async (tx: any) => body(tx));
-			expect(await logged()).toEqual(["outer", "inner"]);
-		});
-
 		// A savepoint opens on the unwrapped transaction, so no stacked layer
-		// runs twice. A rolled-back savepoint also rolls back its middleware.
-		test("savepoints on a stacked wrapped open transaction run each layer once", async () => {
+		// runs twice. A rolled-back savepoint also rolls back its statements.
+		test("savepoints in wrapped.transaction on a stacked db run each layer once", async () => {
 			await reset();
-			const layers = (tx: any) =>
-				withMiddleware(
-					withMiddleware(tx, () => ({ before: [insertLog("inner")] })),
-					() => ({ before: [insertLog("outer")] }),
-				);
+			const wrapped = withMiddleware(
+				withMiddleware(db, () => ({ before: [insertLog("inner")] })),
+				() => ({ before: [insertLog("outer")] }),
+			);
 			const rollBack = new Error("roll back the savepoint");
 			if (driver.sync)
-				db.transaction((tx: any) => {
-					const wrapped = layers(tx);
-					wrapped.transaction((savepoint: any) => {
+				wrapped.transaction((tx: any) => {
+					tx.transaction((savepoint: any) => {
 						savepoint.run(insertLog("kept"));
 					});
 					expect(() =>
-						wrapped.transaction((savepoint: any) => {
+						tx.transaction((savepoint: any) => {
 							savepoint.run(insertLog("dropped"));
 							throw rollBack;
 						}),
 					).toThrow(rollBack);
 				});
 			else
-				await db.transaction(async (tx: any) => {
-					const wrapped = layers(tx);
-					await wrapped.transaction(async (savepoint: any) => {
+				await wrapped.transaction(async (tx: any) => {
+					await tx.transaction(async (savepoint: any) => {
 						await savepoint.insert(t.log).values({ v: "kept" });
 					});
 					await expect(
-						wrapped.transaction(async (savepoint: any) => {
+						tx.transaction(async (savepoint: any) => {
 							await savepoint.insert(t.log).values({ v: "dropped" });
 							throw rollBack;
 						}),

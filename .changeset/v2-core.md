@@ -12,7 +12,7 @@ New execution core. The middleware now fails closed: if it cannot run your state
 
 - `executeBatchTransaction([...queries])` runs several queries and the middleware as one unit.
 - `withMiddleware` returns `WithMiddleware<typeof db>`. Use it as a parameter type to require a wrapped db at compile time.
-- `db.transaction(fn)` runs the middleware once: `before` with the first query, `after` before the commit. A wrapped open transaction runs the middleware around each query. Nested transactions keep the middleware.
+- `db.transaction(fn)` runs the middleware once: `before` with the first query, `after` before the commit. Nested transactions keep the middleware.
 - Wrapped dbs can be stacked.
 
 **Breaking:**
@@ -23,6 +23,7 @@ New execution core. The middleware now fails closed: if it cannot run your state
 - `db.batch()` and other Drizzle APIs that would skip the middleware throw.
 - On bun:sqlite and better-sqlite3, an async transaction callback throws. The driver commits when the callback returns, so the queries after an `await` ran outside the transaction, without the middleware.
 - A query on a `tx` after its transaction ends throws.
+- `withMiddleware` accepts a db, not a transaction. Use `withMiddleware(db, middleware).transaction(fn)`.
 - Drivers other than the ones above are rejected.
 - `withMiddleware` returns `WithMiddleware<typeof db>`, which is still assignable to `typeof db`.
 

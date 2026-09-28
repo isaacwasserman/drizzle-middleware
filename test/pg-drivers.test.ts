@@ -34,12 +34,6 @@ type DriverCase = {
 	connect(url: string): Connected;
 	/** False for a driver that has no one-round-trip mechanism (sequential). */
 	oneRoundTrip: boolean;
-	/**
-	 * False when a wrapped open transaction cannot take one round trip:
-	 * postgres-js with `prepare: false` does not show its setting on a
-	 * transaction client.
-	 */
-	oneRoundTripInOpenTransaction?: false;
 };
 
 function makeTables(schemaName: string) {
@@ -84,7 +78,6 @@ const drivers: DriverCase[] = [
 	{
 		name: "postgres-js (prepare: false)",
 		oneRoundTrip: true,
-		oneRoundTripInOpenTransaction: false,
 		connect: (u) => {
 			const client = postgres(u, {
 				max: 1,
@@ -195,24 +188,6 @@ for (const driver of drivers) {
 			);
 		});
 
-		test("a wrapped open transaction accepts the same values as the driver", async () => {
-			// The inline encoder rejects array parameters, so they must stay
-			// parameters here. (Bun SQL rejects them without the middleware too.)
-			const q = sql`select ${sql.param([1, 2])}::int[] as v`;
-			const outcome = (p: PromiseLike<any>) =>
-				Promise.resolve(p).then(
-					(r) => ({ value: (r.rows ?? r)[0].v }),
-					() => "rejected",
-				);
-			await db.transaction(async (tx: any) => {
-				const wrapped = withMiddleware(tx, () => ({
-					before: [sql`select set_config('app.tenant', 'acme', true)`],
-				}));
-				const plain = await outcome(tx.execute(q));
-				expect(await outcome(wrapped.execute(q))).toEqual(plain);
-			});
-		});
-
 		test("a value cannot inject SQL, even with standard_conforming_strings off", async () => {
 			await reset();
 			await db.execute(sql`set standard_conforming_strings = off`);
@@ -300,19 +275,26 @@ for (const driver of drivers) {
 				}),
 		);
 
-		(driver.oneRoundTrip && driver.oneRoundTripInOpenTransaction !== false
-			? test
-			: test.skip)(
-			"a query on a wrapped open transaction takes one round trip",
+		// Only the first query carries middleware; later queries in the
+		// transaction are plain Drizzle queries.
+		(driver.oneRoundTrip ? test : test.skip)(
+			"the first query in wrapped.transaction sends before with it, in one round trip",
 			() =>
-				withSlowDb((slowDb, proxy) =>
-					slowDb.transaction(async (tx: any) => {
-						const wrapped = withMiddleware(tx, slowMiddleware);
-						await expectOneRoundTrip(proxy, () =>
-							wrapped.select().from(t.users).where(eq(t.users.name, "Ada")),
-						);
-					}),
-				),
+				withSlowDb(async (slowDb, proxy) => {
+					const wrapped = withMiddleware(slowDb, slowMiddleware);
+					let roundTrips = 0;
+					const run = () =>
+						wrapped.transaction(async (tx: any) => {
+							proxy.resetRoundTrips();
+							await tx.select().from(t.users).where(eq(t.users.name, "Ada"));
+							roundTrips = proxy.roundTrips();
+						});
+					// Warm up: the connection, and the driver's statement cache.
+					await run();
+					await run();
+					await run();
+					expect(roundTrips).toBe(1);
+				}),
 		);
 	});
 }

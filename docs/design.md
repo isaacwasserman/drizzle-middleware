@@ -35,7 +35,7 @@ The package cannot check what the middleware statements do. Session-level state 
 | A query on a wrapped db | `before`, the query, `after` |
 | `executeBatchTransaction([...])` | `before`, all queries in order, `after` |
 | `wrapped.transaction(fn)` | `before` is sent with the first query in the transaction. `after` is sent as one batch before the commit. The factory is called once for the transaction. |
-| A query on `withMiddleware(tx)` (an open transaction) | `before`, the query, `after`, inside that transaction. There is no new transaction; atomicity comes from the outer one. |
+| `withMiddleware(tx)` (a transaction) | Throws. Most drivers do not show when a transaction has ended: node-postgres, postgres-js and Bun SQL run queries on a kept transaction object after its end, on a connection that another request can use. So only a db can be wrapped, and `wrapped.transaction(fn)` tracks the end of its own transactions. |
 | A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. In `wrapped.transaction(fn)`, if the scope's `before` has not run yet, it runs on the parent before the savepoint opens, so a rolled-back savepoint cannot undo it. |
 
 `setTransaction()` on a wrapped transaction runs without middleware, as the first statement, because Postgres rejects `SET TRANSACTION` after any other statement. It is a transaction-control statement and reads no data; this is a reviewed exception. Because `before` goes out with the first query of a transaction, the order stays valid.

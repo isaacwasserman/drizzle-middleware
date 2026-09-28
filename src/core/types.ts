@@ -1,8 +1,14 @@
 // Public types of the package.
 
 import type { SQL } from "drizzle-orm-beta";
-import type { PgAsyncDatabase } from "drizzle-orm-beta/pg-core";
-import type { BaseSQLiteDatabase } from "drizzle-orm-beta/sqlite-core";
+import type {
+	PgAsyncDatabase,
+	PgAsyncTransaction,
+} from "drizzle-orm-beta/pg-core";
+import type {
+	BaseSQLiteDatabase,
+	SQLiteTransaction,
+} from "drizzle-orm-beta/sqlite-core";
 
 /** The statements a middleware factory returns for one unit. */
 export interface MiddlewareStatements {
@@ -17,30 +23,45 @@ export interface MiddlewareStatements {
 export type Middleware = () => MiddlewareStatements;
 
 /**
- * `T` if it is an async Postgres Drizzle db or transaction, else `never`.
- * Drizzle's type parameters are invariant, so a constraint with wide type
- * arguments would reject real dbs. Matching with `infer` accepts every
- * instantiation.
+ * `T` if it is an async Postgres Drizzle db, else `never`. A transaction is
+ * `never`: withMiddleware accepts only a db. Drizzle's type parameters are
+ * invariant, so a constraint with wide type arguments would reject real dbs.
+ * Matching with `infer` accepts every instantiation.
  */
-export type PgDb<T> = T extends PgAsyncDatabase<
+export type PgDb<T> = T extends PgAsyncTransaction<
 	infer _Result,
 	infer _FullSchema,
 	infer _Relations,
 	infer _Schema
 >
-	? T
-	: never;
+	? never
+	: T extends PgAsyncDatabase<
+				infer _Result,
+				infer _FullSchema,
+				infer _Relations,
+				infer _Schema
+			>
+		? T
+		: never;
 
-/** `T` if it is a SQLite Drizzle db or transaction (sync or async), else `never`. */
-export type SqliteDb<T> = T extends BaseSQLiteDatabase<
+/** `T` if it is a SQLite Drizzle db (sync or async), else `never`. */
+export type SqliteDb<T> = T extends SQLiteTransaction<
 	infer _Kind,
 	infer _RunResult,
 	infer _FullSchema,
 	infer _Relations,
 	infer _Schema
 >
-	? T
-	: never;
+	? never
+	: T extends BaseSQLiteDatabase<
+				infer _Kind,
+				infer _RunResult,
+				infer _FullSchema,
+				infer _Relations,
+				infer _Schema
+			>
+		? T
+		: never;
 
 interface MiddlewareBrand {
 	readonly __drizzleMiddlewareId: string;

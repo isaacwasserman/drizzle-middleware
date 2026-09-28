@@ -94,6 +94,7 @@ declare function sqliteOnly<T>(db: SqliteDb<T>): T;
 // The exact db type is inferred.
 assertType<Exact<ReturnType<typeof pgOnly<Pg>>, Pg>>();
 const back: Pg = pgOnly(pg);
+// @ts-expect-error -- withMiddleware accepts a db, not a transaction
 pgOnly(pgTx);
 sqliteOnly(syncWrapped);
 // @ts-expect-error -- a SQLite db is not a Postgres db
