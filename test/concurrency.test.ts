@@ -54,6 +54,12 @@ const pgUrlTargets: Target[] = url
 				const pool = new pg.Pool({ connectionString: url, max: 10 });
 				return { db: nodePg({ client: pool }), close: () => pool.end() };
 			}),
+			// One connection: Drizzle opens transactions on the shared client.
+			pgTarget("node-postgres (pg.Client)", async () => {
+				const client = new pg.Client({ connectionString: url });
+				await client.connect();
+				return { db: nodePg({ client }), close: () => client.end() };
+			}),
 			pgTarget("postgres-js (prepare: true)", async () => {
 				const client = postgres(url, { max: 10, onnotice: () => {} });
 				return { db: postgresJs({ client }), close: () => client.end() };

@@ -11,6 +11,7 @@ import {
 	runPipeline,
 	toPgCall,
 } from "./pg-pipeline.js";
+import { serializeOnClient } from "./transactions.js";
 
 // node-postgres's own value conversion and Result, from the `pg` module the
 // app uses. They make the batched values and results equal to Drizzle's.
@@ -51,19 +52,28 @@ async function send(
 	}
 }
 
+// A client that is not a pool (a `pg.Client`, or a `PoolClient` that the app
+// checked out) is one connection, and Drizzle opens its transactions on it.
+// Work from another request sent during an open transaction would run inside
+// it, so the client's work runs one item at a time, like a pool of one.
+// Drizzle's own pool check covers more than `isPool`, so the queue is on
+// whenever Drizzle shares the connection.
 export const nodePostgres: DriverEntry = {
 	sessionKind: "NodePgSession",
 	dialect: "pg",
-	driverFor: () =>
-		batchDriver<PgCall, PgResult>({
-			strategy: "pipeline",
-			recordingSession: (session, recorder) =>
-				copySession(session, {
-					client: {
-						query: (config: unknown, values: unknown) =>
-							recorder.record(toPgCall(config, values)),
-					},
-				}),
-			send: (session, calls) => send(readMember(session, "client"), calls),
-		}),
+	driverFor: (session) =>
+		batchDriver<PgCall, PgResult>(
+			{
+				strategy: "pipeline",
+				recordingSession: (s, recorder) =>
+					copySession(s, {
+						client: {
+							query: (config: unknown, values: unknown) =>
+								recorder.record(toPgCall(config, values)),
+						},
+					}),
+				send: (s, calls) => send(readMember(s, "client"), calls),
+			},
+			isPool(readMember(session, "client")) ? undefined : serializeOnClient,
+		),
 };

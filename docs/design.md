@@ -66,7 +66,7 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 
 | Driver | Strategy | Verified |
 |---|---|---|
-| node-postgres | Pipeline | Yes (tests, real Postgres) |
+| node-postgres | Pipeline; with a client that is not a pool, one unit at a time for each client | Yes (tests, real Postgres) |
 | neon-serverless (WebSocket) | Pipeline | Yes (spike, through Neon wsproxy) |
 | Vercel Postgres | Pipeline (uses the neon-serverless client) | No |
 | Netlify DB, WebSocket session | Pipeline, if its client is node-postgres compatible | No |
@@ -98,6 +98,8 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 | Prisma SQLite | Sequential (`$transaction`) | Fake client only |
 
 Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
+
+Note: node-postgres with a `pg.Client` (or a checked-out `PoolClient`) is one connection, and Drizzle opens its transactions on it. Work sent during an open transaction runs inside it, so another request's `before` would change the transaction's state. The package queues the client's work in the same way as for Bun SQL SQLite (below). Drizzle's own pool check covers more clients than the package's, so the queue is on whenever Drizzle shares the connection.
 
 Note: Bun SQL SQLite has one connection, and it does not queue transactions. A `begin` while a transaction is open throws, and a query sent while a transaction is open runs in that transaction. So the package queues all work on a client from its wrapped dbs: a unit, a `transaction(fn)` scope or a query without middleware starts only when the earlier one has ended. Work inside a transaction does not wait. Queries on the unwrapped db do not go through the queue.
 

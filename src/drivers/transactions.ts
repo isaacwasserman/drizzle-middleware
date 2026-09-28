@@ -2,6 +2,7 @@
 
 import type {
 	AsyncTransactionDriver,
+	Serialize,
 	SyncTransactionDriver,
 } from "../core/driver.js";
 import {
@@ -40,26 +41,35 @@ export function drizzleAsyncTransaction(
 const queues = new WeakMap<object, Promise<unknown>>();
 
 /**
+ * A queue for each client: work from wrapped dbs on the session's client runs
+ * one item at a time, in call order. An item is a unit, or a whole
+ * `wrapped.transaction(fn)`.
+ */
+export const serializeOnClient: Serialize = <T>(
+	session: DrizzleSession,
+	body: () => Promise<T>,
+): Promise<T> => {
+	const client = readMember(session, "client");
+	// A Bun SQL client is a function (a tagged template).
+	if (
+		client === null ||
+		(typeof client !== "object" && typeof client !== "function")
+	)
+		throw new DrizzleInternalsError("the session has no client");
+	const result = (queues.get(client) ?? Promise.resolve()).then(body);
+	const settled = () => undefined;
+	queues.set(client, result.then(settled, settled));
+	return result;
+};
+
+/**
  * Like `drizzleAsyncTransaction("local-transaction")`, for a client with one
- * connection that does not queue transactions: work on the client runs one
- * item at a time, in call order.
+ * connection that does not queue transactions.
  */
 export function serializedAsyncTransaction(): AsyncTransactionDriver {
 	return {
 		...drizzleAsyncTransaction("local-transaction"),
-		serialize<T>(session: DrizzleSession, body: () => Promise<T>): Promise<T> {
-			const client = readMember(session, "client");
-			// A Bun SQL client is a function (a tagged template).
-			if (
-				client === null ||
-				(typeof client !== "object" && typeof client !== "function")
-			)
-				throw new DrizzleInternalsError("the session has no client");
-			const result = (queues.get(client) ?? Promise.resolve()).then(body);
-			const settled = () => undefined;
-			queues.set(client, result.then(settled, settled));
-			return result;
-		},
+		serialize: serializeOnClient,
 	};
 }
 

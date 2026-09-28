@@ -253,14 +253,13 @@ function rejectAsyncCallback(state: WrapState, result: unknown): void {
  */
 function exclusive(state: WrapState, body: () => unknown): unknown {
 	const { driver } = state;
-	if (
-		state.inTransaction ||
-		driver.kind !== "transaction" ||
-		driver.mode !== "async" ||
-		driver.serialize === undefined
-	)
-		return body();
-	return driver.serialize(state.session, async () => body());
+	const serialize =
+		driver.kind === "batch" ||
+		(driver.kind === "transaction" && driver.mode === "async")
+			? driver.serialize
+			: undefined;
+	if (state.inTransaction || serialize === undefined) return body();
+	return serialize(state.session, async () => body());
 }
 
 function first(values: unknown[] | Promise<unknown[]>): unknown {

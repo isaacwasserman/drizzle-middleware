@@ -68,6 +68,15 @@ export class BatchError extends Error {
 }
 
 /**
+ * For a client with one connection: runs `body` after all earlier work on the
+ * same client, so no unit joins a transaction that another one has open.
+ */
+export type Serialize = <T>(
+	session: DrizzleSession,
+	body: () => Promise<T>,
+) => Promise<T>;
+
+/**
  * A batch driver with its call and result types hidden. `use` gives the spec
  * back with its own types, so the registry needs no `any`.
  */
@@ -77,16 +86,20 @@ export interface BatchDriver {
 	use<R>(
 		visit: <TCall, TResult>(spec: BatchDriverSpec<TCall, TResult>) => R,
 	): R;
+	/** Set when the client has one connection (see `Serialize`). */
+	readonly serialize?: Serialize;
 }
 
 export function batchDriver<TCall, TResult>(
 	spec: BatchDriverSpec<TCall, TResult>,
+	serialize?: Serialize,
 ): BatchDriver {
-	return {
+	const driver: BatchDriver = {
 		kind: "batch",
 		strategy: spec.strategy,
 		use: (visit) => visit(spec),
 	};
+	return serialize === undefined ? driver : { ...driver, serialize };
 }
 
 /** A sync SQLite driver: the unit runs inside a native sync transaction. */
@@ -106,15 +119,8 @@ export interface AsyncTransactionDriver {
 		session: DrizzleSession,
 		body: (txSession: DrizzleSession) => Promise<T>,
 	): Promise<T>;
-	/**
-	 * Set for a driver with one connection that does not queue its
-	 * transactions. Runs `body` after all earlier work on the same client, so
-	 * no query joins a transaction that another unit has open.
-	 */
-	readonly serialize?: <T>(
-		session: DrizzleSession,
-		body: () => Promise<T>,
-	) => Promise<T>;
+	/** Set when the client has one connection (see `Serialize`). */
+	readonly serialize?: Serialize;
 }
 
 /** A driver that cannot give the guarantees; `withMiddleware` throws. */

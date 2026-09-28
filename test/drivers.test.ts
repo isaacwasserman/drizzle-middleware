@@ -145,6 +145,22 @@ const drivers: DriverCase[] = [
 					},
 					(client, config) => nodePg({ client, ...config }),
 				),
+				{
+					name: "node-postgres (pg.Client)",
+					dialect: "pg",
+					sync: false,
+					open: (config) => {
+						const client = new pg.Client({ connectionString: url });
+						const connected = client.connect();
+						return {
+							db: nodePg({ client, ...config }),
+							close: async () => {
+								await connected;
+								await client.end();
+							},
+						};
+					},
+				} satisfies DriverCase,
 				tcpPg(
 					"postgres-js (prepare: true)",
 					(u) => {
