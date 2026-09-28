@@ -10,7 +10,7 @@ import {
 	sqliteTable,
 	text as sqliteText,
 } from "drizzle-orm-beta/sqlite-core";
-import { executeBatchTransaction, withMiddleware } from "../src/v2/pg.ts";
+import { executeBatchTransaction, withMiddleware } from "../src/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),

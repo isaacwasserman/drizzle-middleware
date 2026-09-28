@@ -15,8 +15,8 @@ import {
 	text as stext,
 } from "drizzle-orm-beta/sqlite-core";
 import { readMember } from "../src/internal/drizzle.ts";
-import { withMiddleware as withPgMiddleware } from "../src/v2/pg.ts";
-import { withMiddleware as withSqliteMiddleware } from "../src/v2/sqlite.ts";
+import { withMiddleware as withPgMiddleware } from "../src/pg.ts";
+import { withMiddleware as withSqliteMiddleware } from "../src/sqlite.ts";
 import { driverTest } from "./helpers/drivers.ts";
 
 const secrets = pgTable("secrets", {

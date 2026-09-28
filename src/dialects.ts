@@ -1,17 +1,17 @@
 // The Postgres and SQLite dialect configs of the v2 core.
 
-import { PG_RULES, SQLITE_RULES } from "../core/unit.js";
-import type { DialectConfig } from "../core/wrap.js";
-import { driverFor } from "../drivers/registry.js";
-import { entityKindOf } from "../internal/drizzle.js";
+import { PG_RULES, SQLITE_RULES } from "./core/unit.js";
+import type { DialectConfig } from "./core/wrap.js";
+import { driverFor } from "./drivers/registry.js";
+import { entityKindOf } from "./internal/drizzle.js";
 import {
 	PREPARED_ALLOWED as PG_PREPARED,
 	SESSION_ALLOWED as PG_SESSION,
-} from "../pg-guard.js";
+} from "./pg-guard.js";
 import {
 	PREPARED_ALLOWED as SQLITE_PREPARED,
 	SESSION_ALLOWED as SQLITE_SESSION,
-} from "../sqlite-guard.js";
+} from "./sqlite-guard.js";
 
 export const PG_CONFIG: DialectConfig = {
 	rules: PG_RULES,

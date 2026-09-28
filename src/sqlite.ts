@@ -1,62 +1,24 @@
-import { entityKind } from "drizzle-orm-beta";
-import type { BaseSQLiteDatabase } from "drizzle-orm-beta/sqlite-core";
-import {
-	type Middleware,
-	buildWrappedDb,
-	executeBatch,
-	executeBatchTransaction,
-} from "./shared.js";
-import { PREPARED_ALLOWED, SESSION_ALLOWED } from "./sqlite-guard.js";
+import type {
+	BatchResults,
+	Middleware,
+	SqliteDb,
+	WithMiddleware,
+} from "./core/types.js";
+import { withMiddlewareWith } from "./core/wrap.js";
+import { SQLITE_CONFIG } from "./dialects.js";
 
-export type { Middleware };
-export { executeBatchTransaction };
+export type { BatchResults, Middleware, WithMiddleware };
+export { executeBatchTransaction } from "./pg.js";
 
-// Driver transactions subclass `SQLiteTransaction` (e.g. `SQLiteBunTransaction`,
-// `LibSQLTransaction`), so match on the prototype chain, not the exact kind.
-function isSqliteTransaction(db: unknown): boolean {
-	let proto = Object.getPrototypeOf(db);
-	while (proto != null) {
-		if (proto.constructor?.[entityKind] === "SQLiteTransaction") return true;
-		proto = Object.getPrototypeOf(proto);
-	}
-	return false;
-}
-
-export function withMiddleware<
-	TDb extends BaseSQLiteDatabase<any, any, any, any>,
->(db: TDb, middleware: Middleware): TDb {
-	const d = db as any;
-	const isTransaction = isSqliteTransaction(db);
-	return buildWrappedDb(d, middleware, {
-		rawPrepareArgs: () => [undefined, "all", false],
-		txPrepareArgs: () => [undefined, "run", false],
-		// Keep the relational-query flags that D1, Durable Objects, and the
-		// proxy driver set; they change the shape of relational results.
-		makeDbArgs: isTransaction
-			? (d, dialect, session, schemaArg) => [
-					d.resultKind,
-					dialect,
-					session,
-					d._.relations,
-					schemaArg,
-					d.nestedIndex,
-					d.rowModeRQB,
-					d.forbidJsonb,
-				]
-			: (d, dialect, session, schemaArg) => [
-					d.resultKind,
-					dialect,
-					session,
-					d._.relations,
-					schemaArg,
-					d.rowModeRQB,
-					d.forbidJsonb,
-				],
-		isSync: d.resultKind === "sync",
-		isTransactionInput: isTransaction,
-		execBatch: d.resultKind === "sync" ? undefined : executeBatch,
-		wrap: withMiddleware,
-		sessionMembers: SESSION_ALLOWED,
-		preparedMembers: PREPARED_ALLOWED,
-	}) as TDb;
+/** Wraps a SQLite Drizzle db (or open transaction) with middleware. */
+export function withMiddleware<TDb>(
+	db: SqliteDb<TDb>,
+	middleware: Middleware,
+): WithMiddleware<TDb> {
+	// The wrapped db is built at runtime from `db`'s own class: `TDb` plus the brand.
+	return withMiddlewareWith(
+		SQLITE_CONFIG,
+		db,
+		middleware,
+	) as WithMiddleware<TDb>;
 }

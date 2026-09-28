@@ -1,7 +1,7 @@
 # Where each v1 test went
 
 The v1 tests were copied or rewritten for v2. This file accounts for every one
-of them. All tests in `test/` run against v2 (`src/v2/`).
+of them. All tests in `test/` run against v2.
 
 - **Drivers without a registry entry yet:** their tests are `test.todo` (see
   `helpers/drivers.ts`). They become normal tests when the driver's entry lands.

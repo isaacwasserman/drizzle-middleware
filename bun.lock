@@ -18,8 +18,12 @@
         "typescript": "7",
       },
       "peerDependencies": {
-        "drizzle-orm": ">=1.0.0-0",
+        "drizzle-orm": "1.0.0-beta.22",
+        "pg": "^8.0.0",
       },
+      "optionalPeers": [
+        "pg",
+      ],
     },
   },
   "packages": {

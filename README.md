@@ -1,215 +1,142 @@
 # drizzle-middleware
 
-Query middleware for [Drizzle ORM](https://orm.drizzle.team). Prepends and appends SQL statements to every query in a single round trip — useful for RLS, audit trails, tenant isolation, or session configuration.
+Run SQL statements before and after every [Drizzle ORM](https://orm.drizzle.team) query, in the same transaction and, where the driver allows it, in one round trip. Use it for row-level security, tenant isolation, audit trails, or session settings.
 
-Supports Postgres and SQLite (sync and async). Requires `drizzle-orm` v1.0.0-beta or later.
+The package fails closed: if it cannot run the middleware with its guarantees, the query does not run. It throws.
 
 ## Install
 
 ```bash
-npm install drizzle-middleware
-# or
-pnpm install drizzle-middleware
-# or
 bun add drizzle-middleware
+# or
+npm install drizzle-middleware
 ```
+
+Requires `drizzle-orm` **1.0.0-beta.22**, the version the tests run against.
+
+## Supported drivers
+
+| Driver | How a unit runs | Round trips |
+|---|---|---|
+| node-postgres (`pg`) | One pipeline: every statement, then one Sync | 1 |
+| postgres-js, `prepare: true` | `BEGIN`, the statements and `COMMIT`, pipelined on one connection | 1 (after the first run of each query text on a connection) |
+| postgres-js, `prepare: false` | The same, with values written into the SQL by a strict encoder | 1 |
+| Bun SQL (Postgres), Bun 1.4+, `prepare: true` | `BEGIN`, the statements and `COMMIT`, pipelined on one connection | 1 |
+| Bun SQL, `prepare: false`, or Bun before 1.4 | One statement at a time, in a transaction | 1 per statement |
+| PGlite | A local transaction | In-process |
+| bun:sqlite, better-sqlite3 | A native sync transaction | In-process |
+
+Any other driver throws when you wrap it.
 
 ## Usage
 
 ```ts
 import { withMiddleware } from "drizzle-middleware/pg";
-// or
-import { withMiddleware } from "drizzle-middleware/sqlite";
-```
-
-`withMiddleware` takes a Drizzle database instance and a middleware factory function, and returns a new database instance of the same type. The factory is called on every query execution and returns arrays of SQL statements to run before and/or after the query.
-
-### RLS via set_config
-
-```ts
-import { withMiddleware } from "drizzle-middleware/pg";
+// or: import { withMiddleware } from "drizzle-middleware/sqlite";
 import { sql } from "drizzle-orm";
 
 const db = withMiddleware(baseDb, () => ({
-  before: [
-    sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`,
-    sql`SELECT set_config('app.user_role', ${role}, true)`,
-  ],
-  after: [
-    sql`SELECT set_config('app.tenant_id', '', true)`,
-  ],
+  before: [sql`select set_config('app.tenant_id', ${tenantId}, true)`],
+  after: [sql`select set_config('app.tenant_id', '', true)`],
 }));
 
-await db.select().from(users).where(eq(users.id, 42));
+await db.select().from(users);
 ```
 
-All statements are sent in a single round trip:
+The middleware factory is called for each unit. It returns the `before` and `after` statements, as arrays of Drizzle `SQL` objects. When both are empty or missing, the query runs without middleware.
 
-```sql
-SELECT set_config('app.tenant_id', 'abc', true);
-SELECT set_config('app.user_role', 'admin', true);
-SELECT "id", "name" FROM "users" WHERE "id" = 42;
-SELECT set_config('app.tenant_id', '', true)
--- one round trip
-```
+## Guarantees
 
-### Transactions
+For every unit (the `before` statements, one or more queries, the `after` statements):
 
-For user-managed transactions, before/after queries execute individually at the transaction boundaries:
+1. **Order.** `before`, the queries, then `after`.
+2. **Atomicity.** All statements run in one transaction. If one fails, the unit rolls back, and you get the error of the statement that failed.
+3. **Same connection.** Transaction-local state set in `before` (`set_config(..., true)`, `SET LOCAL`) is visible to the queries, and it is gone after the unit.
+4. **Exact values.** Values stay parameters. The one exception is postgres-js with `prepare: false`: there, the strict encoder writes each value as a literal that behaves like the parameter, and it throws for any value outside a closed set (strings, numbers, bigints, booleans, bytes, null).
+5. **Exact results.** Drizzle prepares each query, calls the driver, and maps the result. You get the same result as without middleware.
+
+The package cannot check what your statements do. Use transaction-local state only: session-level state (`set_config(..., false)`, `SET` without `LOCAL`) stays on a pooled connection and reaches later queries.
+
+## Transactions
 
 ```ts
 await db.transaction(async (tx) => {
-  await tx.select().from(users);
+  await tx.select().from(users); // before is sent with this first query
   await tx.insert(logs).values({ action: "read" });
-});
-
-// BEGIN
-// SELECT set_config('app.tenant_id', 'abc', true)    -- before
-// SELECT set_config('app.user_role', 'admin', true)   -- before
-// SELECT "id", "name" FROM "users"                    -- user query
-// INSERT INTO "logs" ("action") VALUES ($1)            -- user query
-// SELECT set_config('app.tenant_id', '', true)         -- after
-// COMMIT
+}); // after is sent before the commit
 ```
 
-You can also wrap a transaction that is already open. Then before/after run around each query in it, and a nested transaction (savepoint) is wrapped with the same middleware:
+In `db.transaction(fn)`, the factory is called once for the transaction. `before` goes out with the first query, and `after` goes out before the commit. `tx` is wrapped too, and nested transactions (savepoints) keep the middleware.
+
+You can also wrap a transaction that is already open. Then `before` and `after` run around each query in it:
 
 ```ts
 await baseDb.transaction(async (tx) => {
   const wrapped = withMiddleware(tx, middleware);
   await wrapped.select().from(users); // before, query, after
-  await wrapped.transaction(async (savepoint) => {
-    await savepoint.insert(logs).values({ action: "read" }); // before, query, after
-  });
 });
 ```
 
-### Dynamic middleware
+`setTransaction()` on a wrapped transaction runs without middleware, because Postgres requires `SET TRANSACTION` to be the first statement of a transaction.
 
-The middleware factory is called on every query execution. Return different statements based on request context:
+## Stacking
 
-```ts
-const db = withMiddleware(baseDb, () => {
-  const tenant = getCurrentTenant();
-  if (!tenant) return {};
-  return {
-    before: [sql`SELECT set_config('app.tenant', ${tenant}, true)`],
-  };
-});
-```
-
-When the factory returns empty `before` and `after` (or `{}`), the query executes directly with no wrapping — a fast path with zero overhead.
-
-### SQLite (sync)
-
-For sync SQLite drivers like `bun:sqlite`, queries are wrapped in a transaction and executed individually:
+A wrapped db can be wrapped again. `before` runs outermost layer first, and `after` runs innermost layer first. The whole stack is still one unit.
 
 ```ts
-import { withMiddleware } from "drizzle-middleware/sqlite";
-
-const db = withMiddleware(baseDb, () => ({
-  before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', ${tenantId})`],
-}));
-
-db.select().from(users).all();
+const tenantDb = withMiddleware(baseDb, tenantMiddleware);
+const auditedDb = withMiddleware(tenantDb, auditMiddleware);
 ```
 
-### Drivers that cannot batch
+## executeBatchTransaction
 
-Prisma (PG and SQLite) and the SQLite proxy driver run one statement per call, so they cannot batch. For these drivers, the middleware opens a transaction (a Prisma interactive transaction, or the proxy's own `begin` … `commit`) and runs before, the query, and after one at a time in it. They are still atomic, but each statement is a separate round trip.
-
-pg-proxy and Xata are not supported. They have no batch and no transactions, so separate calls would not be atomic, and transaction-local state such as `set_config(..., true)` would not reach the query. `withMiddleware` throws for them.
-
-## Batched transactions
-
-The same machinery that lets middleware run in one round trip is also exported
-directly as `executeBatchTransaction`. It takes an array of Drizzle queries and runs
-them in a single batch, sequentially, then returns each query's result as a
-tuple in the same order:
+Runs several queries, plus the middleware of the db they come from, as one unit:
 
 ```ts
 import { executeBatchTransaction } from "drizzle-middleware";
-// or: import { executeBatchTransaction } from "drizzle-middleware/pg";
 
-const [inserted, users] = await executeBatchTransaction([
-  db.insert(users).values({ name: "Alice" }).returning(),
+const [inserted, rows] = await executeBatchTransaction([
+  db.insert(users).values({ name: "Ada" }).returning(),
   db.select().from(users),
 ]);
 ```
 
-Pass the queries built from your normal database instance — do not `await` them
-first. Each query keeps its own type, so the returned tuple is fully typed. The
-queries must come from the same database instance.
+Pass query builders, not awaited results. All queries must come from the same db.
 
-Like the middleware, the queries are compiled with parameters inlined and sent
-through the driver's native batch mechanism (one Simple Query message for
-TCP drivers, the batch API for HTTP drivers). For sync SQLite (`bun:sqlite`)
-there is no round trip to collapse, so the queries run atomically inside one
-native transaction instead.
+## Types
 
-If the queries come from a `withMiddleware`-wrapped db, the middleware is
-honored: every layer's `before`/`after` runs once around the whole batch (never
-bypassed). This is the same envelope the middleware itself runs through.
-
-### Composing middleware
-
-`withMiddleware` can wrap an already-wrapped db. The layers compose as an onion:
-each `before` runs outermost-first, each `after` innermost-first, and the whole
-stack still executes in a single round trip.
+`withMiddleware(db, factory)` returns `WithMiddleware<typeof db>`: the db's own type plus a brand. A wrapped db is accepted everywhere the base db is. To require a wrapped db, use the brand in a parameter type:
 
 ```ts
-const rls = withMiddleware(baseDb, () => ({
-  before: [sql`SELECT set_config('app.tenant', ${tenantId}, true)`],
-}));
-const audited = withMiddleware(rls, () => ({
-  after: [sql`INSERT INTO audit (action) VALUES ('read')`],
-}));
+import type { WithMiddleware } from "drizzle-middleware/pg";
 
-// One round trip: set_config → user query → audit insert.
-await audited.select().from(users);
+function listUsers(db: WithMiddleware<typeof baseDb>) {
+  return db.select().from(users);
+}
+
+listUsers(baseDb); // compile error
+listUsers(db); // ok
 ```
 
-### Fail-closed guard
+The `tx` inside `db.transaction(fn)` has the brand too.
 
-A wrapped db only exposes the session and prepared-query members that are known to run the middleware. If Drizzle code tries to read any other member, for example the driver client or a method that calls the driver directly, the read throws. It does not skip the middleware:
+## What throws
 
-```ts
-const db = withMiddleware(libsqlDb, middleware);
-await db.batch([...]); // throws: `batch` sends queries without the middleware
-```
+- A driver that is not in the table above.
+- A db with a Drizzle query cache. A cache key has no middleware context, so a cached result could reach a caller whose middleware gives a different result.
+- `db.$client` on a wrapped db. A query sent on the driver client does not run the middleware. Use the unwrapped db's `$client` if you need the driver.
+- Drizzle APIs that send queries without the middleware, such as `db.batch()`, or any other member that the package has not reviewed.
+- A Drizzle version whose internals differ from the tested version.
 
-This applies to Postgres and SQLite. A member that a new Drizzle version adds is blocked until it is reviewed. `$client` on a wrapped db also throws, because a query sent on the driver does not run the middleware. The guard applies only to access through the wrapped db: the unwrapped db and its `$client` still reach the driver directly.
+## Driver notes
 
-## API Reference
+- **node-postgres:** `pg` is an optional peer dependency, loaded only when you wrap a node-postgres db.
+- **postgres-js:** with `prepare: true`, the first run of each query text on a connection costs about one extra round trip per statement, while postgres-js learns the parameter types. After that, it is one round trip.
+- **Bun SQL:** one round trip needs Bun 1.4 or newer and `prepare: true` (the default).
 
-### Subpaths
+## How it works
 
-| Subpath | Exports |
-|---|---|
-| `drizzle-middleware/pg` | `withMiddleware`, `Middleware`, `executeBatchTransaction` |
-| `drizzle-middleware/sqlite` | `withMiddleware`, `Middleware`, `executeBatchTransaction` |
-| `drizzle-middleware` | `withPgMiddleware`, `PgMiddleware`, `withSqliteMiddleware`, `SqliteMiddleware`, `executeBatchTransaction` |
-
-### Signature
-
-```ts
-type Middleware = () => {
-  before?: SQL[];
-  after?: SQL[];
-};
-
-function withMiddleware<TDb>(db: TDb, middleware: Middleware): TDb;
-
-function executeBatchTransaction<T extends readonly PromiseLike<unknown>[]>(
-  queries: readonly [...T],
-): Promise<{ [K in keyof T]: Awaited<T[K]> }>;
-```
-
-## How It Works
-
-`withMiddleware` proxies both the dialect and the session. The dialect proxy captures the SQL AST before compilation so parameters can be inlined into the SQL string. The session proxy intercepts query preparation and wraps each execution method.
-
-The middleware selects the native batching mechanism exposed by the driver. TCP-based drivers concatenate all statements into one Simple Query message, HTTP drivers use their batch API, and sync SQLite uses an explicit transaction.
+`withMiddleware` builds a new db of the same class around a guarded session. When a query runs, the package runs Drizzle's own prepared query for each statement of the unit against a stand-in for the driver client, which records the one driver call that Drizzle makes. It then sends the recorded calls with the driver's batching mechanism, and gives each result back to Drizzle to map. See [docs/design.md](docs/design.md) for the full design.
 
 ## License
 

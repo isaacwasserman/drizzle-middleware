@@ -1,10 +1,10 @@
-// Fails when the strict (v2) folders contain a comment that turns off type
+// Fails when the source contains a comment that turns off type
 // checking. Biome 1.9 has no rule for this.
 import { Glob } from "bun";
 
 const banned = /@ts-(ignore|nocheck)\b/;
 const failures: string[] = [];
-for (const dir of ["src/core", "src/internal", "src/drivers", "src/v2"]) {
+for (const dir of ["src"]) {
 	for await (const path of new Glob("**/*.ts").scan({ cwd: dir })) {
 		const lines = (await Bun.file(`${dir}/${path}`).text()).split("\n");
 		lines.forEach((line, i) => {

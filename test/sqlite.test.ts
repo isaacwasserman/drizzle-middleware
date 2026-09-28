@@ -15,8 +15,8 @@ import {
 	text,
 } from "drizzle-orm-beta/sqlite-core";
 import { readMember } from "../src/internal/drizzle.ts";
-import { executeBatchTransaction } from "../src/v2/pg.ts";
-import { withMiddleware } from "../src/v2/sqlite.ts";
+import { executeBatchTransaction } from "../src/pg.ts";
+import { withMiddleware } from "../src/sqlite.ts";
 import { driverTest } from "./helpers/drivers.ts";
 import { fakePrisma } from "./helpers/fake-prisma.ts";
 

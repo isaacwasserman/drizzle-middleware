@@ -20,7 +20,7 @@ import { drizzle as postgresJs } from "drizzle-orm-beta/postgres-js";
 import pg from "pg";
 import postgres from "postgres";
 import type { SessionKind } from "../src/core/driver.ts";
-import { withMiddleware } from "../src/v2/pg.ts";
+import { withMiddleware } from "../src/pg.ts";
 import { driverDescribe } from "./helpers/drivers.ts";
 import { startLatencyProxy } from "./helpers/latency-proxy.ts";
 

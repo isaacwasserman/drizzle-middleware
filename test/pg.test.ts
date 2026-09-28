@@ -17,7 +17,7 @@ import { drizzle } from "drizzle-orm-beta/pglite";
 import { PgliteTransaction } from "drizzle-orm-beta/pglite/session";
 import { PrismaPgSession } from "drizzle-orm-beta/prisma/pg/session";
 import { asDrizzleDialect, readMember } from "../src/internal/drizzle.ts";
-import { executeBatchTransaction, withMiddleware } from "../src/v2/pg.ts";
+import { executeBatchTransaction, withMiddleware } from "../src/pg.ts";
 import { driverTest } from "./helpers/drivers.ts";
 import { fakePrisma } from "./helpers/fake-prisma.ts";
 

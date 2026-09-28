@@ -6,8 +6,8 @@ import { drizzle as betterSqlite3 } from "drizzle-orm-beta/better-sqlite3";
 import { drizzle as bunSqlite } from "drizzle-orm-beta/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm-beta/sqlite-core";
 import { drizzle as drizzleProxy } from "drizzle-orm-beta/sqlite-proxy";
-import { type Middleware, executeBatchTransaction } from "../src/v2/pg.ts";
-import { withMiddleware } from "../src/v2/sqlite.ts";
+import { type Middleware, executeBatchTransaction } from "../src/pg.ts";
+import { withMiddleware } from "../src/sqlite.ts";
 import { driverDescribe } from "./helpers/drivers.ts";
 
 const users = sqliteTable("users", {

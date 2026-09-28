@@ -4,7 +4,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { defineRelations, eq, sql } from "drizzle-orm-beta";
 import { integer, pgTable, serial, text } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
-import { type Middleware, withMiddleware } from "../src/v2/pg.ts";
+import { type Middleware, withMiddleware } from "../src/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),
@@ -301,7 +301,7 @@ describe("e2e: pglite middleware", () => {
 		await db.insert(users).values({ name: "Omar" });
 		await db.insert(orders).values({ userId: 1 });
 
-		const { executeBatchTransaction } = await import("../src/v2/pg.ts");
+		const { executeBatchTransaction } = await import("../src/pg.ts");
 		const [joined] = await executeBatchTransaction([
 			db.select().from(users).innerJoin(orders, eq(orders.userId, users.id)),
 		]);

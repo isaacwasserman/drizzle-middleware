@@ -1,6 +1,6 @@
 # drizzle-middleware v2: design and semantics
 
-Status: draft for review. Nothing here is implemented yet.
+Status: implemented for the first release (node-postgres, postgres-js, Bun SQL Postgres, PGlite, bun:sqlite, better-sqlite3). The other drivers in section 5 are planned; `withMiddleware` throws for them.
 
 ## 1. Goals
 
