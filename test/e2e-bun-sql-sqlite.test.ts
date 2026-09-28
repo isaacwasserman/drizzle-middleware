@@ -142,6 +142,22 @@ describe("e2e: Bun SQL SQLite", () => {
 		expect(await db.select().from(users)).toHaveLength(2);
 	});
 
+	test("a rolled-back savepoint does not undo the transaction's before", async () => {
+		const { db } = await createDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [insertLog("tenant")],
+		}));
+		await wrapped.transaction(async (tx) => {
+			await expect(
+				tx.transaction(async (savepoint) => {
+					expect(await logged(savepoint as unknown as Db)).toEqual(["tenant"]);
+					throw new Error("roll back the savepoint");
+				}),
+			).rejects.toThrow("roll back the savepoint");
+			expect(await logged(tx as unknown as Db)).toEqual(["tenant"]);
+		});
+	});
+
 	test("a wrapped open transaction runs the middleware around each query, in it", async () => {
 		const { db } = await createDb();
 		await expect(

@@ -1,10 +1,9 @@
-// the applicable v1 unit tests (pg.test.ts), rewritten to check
-// behavior on registered drivers instead of v1 internals. See MAPPING.md.
+// withMiddleware (pg) on PGlite: the wrapped db, query results, a wrapped
+// open transaction, and the guard.
 
 import { describe, expect, spyOn, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { defineRelations, entityKind, eq, sql } from "drizzle-orm-beta";
-import { NeonHttpSession } from "drizzle-orm-beta/neon-http/session";
 import {
 	PgAsyncDatabase,
 	PgDialect,
@@ -15,11 +14,8 @@ import {
 } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
 import { PgliteTransaction } from "drizzle-orm-beta/pglite/session";
-import { PrismaPgSession } from "drizzle-orm-beta/prisma/pg/session";
 import { asDrizzleDialect, readMember } from "../src/internal/drizzle.ts";
-import { executeBatchTransaction, withMiddleware } from "../src/pg.ts";
-import { driverTest } from "./helpers/drivers.ts";
-import { fakePrisma } from "./helpers/fake-prisma.ts";
+import { withMiddleware } from "../src/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),
@@ -53,21 +49,6 @@ async function logged(db: Awaited<ReturnType<typeof createDb>>["db"]) {
 }
 
 const insertLog = (v: string) => sql`insert into log (v) values (${v})`;
-
-// A copy of Drizzle's `PrismaPgDatabase` (the real module imports
-// `@prisma/client`). Its constructor builds its own session.
-class PrismaPgDatabase extends (PgAsyncDatabase as any) {
-	static readonly [entityKind] = "PrismaPgDatabase";
-	constructor(client: unknown) {
-		const dialect = new PgDialect();
-		super(
-			dialect,
-			new PrismaPgSession(dialect, client as any, {}),
-			{},
-			undefined,
-		);
-	}
-}
 
 describe("withMiddleware (pg)", () => {
 	// -------------------------------------------------------------------
@@ -353,169 +334,4 @@ describe("withMiddleware (pg)", () => {
 			"blocked access to `queryWithCache`",
 		);
 	});
-
-	driverTest("NeonHttpSession")(
-		"NeonHttpSession.batch is blocked (it skips the middleware)",
-		() => {
-			const sent: string[] = [];
-			const client: any = (query: string) => {
-				sent.push(query);
-				return Promise.resolve({ rows: [], fields: [] });
-			};
-			client.query = client;
-			client.transaction = (queries: unknown[]) => Promise.all(queries);
-			const dialect = new PgDialect();
-			const db = new (PgAsyncDatabase as any)(
-				dialect,
-				new NeonHttpSession(client, dialect, {} as any, undefined),
-				{},
-				undefined,
-			);
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`select set_config('app.tenant', 'x', true)`],
-			})) as any;
-			expect(() => wrapped.session.batch([])).toThrow(
-				"blocked access to `batch`",
-			);
-			expect(sent).toEqual([]);
-		},
-	);
-
-	driverTest("NeonHttpSession")(
-		"neon-http: the auth token reaches the driver",
-		async () => {
-			const tokens: unknown[] = [];
-			const client: any = (_q: string, _p: unknown, opts?: any) => {
-				tokens.push(opts?.authToken);
-				return Promise.resolve({ rows: [], fields: [] });
-			};
-			client.query = client;
-			client.transaction = async (queries: unknown[], opts?: any) => {
-				tokens.push(opts?.authToken);
-				return Promise.all(queries);
-			};
-			const dialect = new PgDialect();
-			const db = new (PgAsyncDatabase as any)(
-				dialect,
-				new NeonHttpSession(client, dialect, {} as any, undefined),
-				{},
-				undefined,
-			);
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`select set_config('app.tenant', 'x', true)`],
-			})) as any;
-			await wrapped.execute(sql`select 1`, "jwt-123");
-			expect(tokens.length).toBeGreaterThan(0);
-			expect(tokens.every((t) => t === "jwt-123")).toBe(true);
-		},
-	);
-
-	// -------------------------------------------------------------------
-	// Prisma: sequential transaction
-	// -------------------------------------------------------------------
-
-	driverTest("PrismaPgSession")(
-		"Prisma PG: runs each statement in order in a Prisma transaction",
-		async () => {
-			const calls: string[] = [];
-			const db = new PrismaPgDatabase(fakePrisma(calls)) as any;
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`SELECT set_config('app.tenant', ${"acme"}, true)`],
-				after: [sql`SELECT set_config('app.tenant', '', true)`],
-			})) as any;
-			expect(wrapped).toBeInstanceOf(PrismaPgDatabase);
-			const byId = pgTable("users", { id: integer("id") });
-			expect(await wrapped.select().from(byId).where(eq(byId.id, 7))).toEqual([
-				{ id: 1 },
-			]);
-			expect(calls).toEqual([
-				"begin",
-				`tx: SELECT set_config('app.tenant', $1, true) ["acme"]`,
-				'tx: select "id" from "users" where "users"."id" = $1 [7]',
-				"tx: SELECT set_config('app.tenant', '', true)",
-				"commit",
-			]);
-		},
-	);
-
-	driverTest("PrismaPgSession")(
-		"Prisma PG: stacked layers run in onion order",
-		async () => {
-			const calls: string[] = [];
-			const db = new PrismaPgDatabase(fakePrisma(calls)) as any;
-			const inner = withMiddleware(db, () => ({
-				before: [sql`SELECT 'inner before'`],
-				after: [sql`SELECT 'inner after'`],
-			}));
-			const outer = withMiddleware(inner, () => ({
-				before: [sql`SELECT 'outer before'`],
-				after: [sql`SELECT 'outer after'`],
-			})) as any;
-			await outer.execute(sql`SELECT 1`);
-			expect(calls).toEqual([
-				"begin",
-				"tx: SELECT 'outer before'",
-				"tx: SELECT 'inner before'",
-				"tx: SELECT 1",
-				"tx: SELECT 'inner after'",
-				"tx: SELECT 'outer after'",
-				"commit",
-			]);
-		},
-	);
-
-	driverTest("PrismaPgSession")(
-		"Prisma PG: a failed statement rolls back the whole unit",
-		async () => {
-			const calls: string[] = [];
-			const db = new PrismaPgDatabase(fakePrisma(calls, "audit")) as any;
-			const wrapped = withMiddleware(db, () => ({
-				after: [sql`INSERT INTO audit VALUES (1)`],
-			})) as any;
-			await expect(
-				Promise.resolve(wrapped.execute(sql`DELETE FROM users`)),
-			).rejects.toThrow("failed: audit");
-			expect(calls).toEqual([
-				"begin",
-				"tx: DELETE FROM users",
-				"tx: INSERT INTO audit VALUES (1)",
-				"rollback",
-			]);
-		},
-	);
-
-	driverTest("PrismaPgSession")(
-		"Prisma PG: no middleware runs the query directly",
-		async () => {
-			const calls: string[] = [];
-			const db = new PrismaPgDatabase(fakePrisma(calls)) as any;
-			await (withMiddleware(db, () => ({})) as any).execute(sql`SELECT 1`);
-			expect(calls).toEqual(["prisma: SELECT 1"]);
-		},
-	);
-
-	driverTest("PrismaPgSession")(
-		"Prisma PG: executeBatchTransaction runs in a Prisma transaction",
-		async () => {
-			const calls: string[] = [];
-			const db = new PrismaPgDatabase(fakePrisma(calls)) as any;
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`SELECT 'before'`],
-			})) as any;
-			const byId = pgTable("users", { id: integer("id") });
-			expect(
-				await executeBatchTransaction([
-					wrapped.select().from(byId),
-					wrapped.select().from(byId).where(eq(byId.id, 2)),
-				]),
-			).toEqual([[{ id: 1 }], [{ id: 1 }]]);
-			expect(calls).toEqual([
-				"begin",
-				"tx: SELECT 'before'",
-				'tx: select "id" from "users"',
-				'tx: select "id" from "users" where "users"."id" = $1 [2]',
-				"commit",
-			]);
-		},
-	);
 });

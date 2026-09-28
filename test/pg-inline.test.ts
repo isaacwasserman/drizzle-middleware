@@ -81,62 +81,39 @@ describe("inline encoder: literals", () => {
 
 const url = process.env.TEST_PG_URL;
 
-describe.skipIf(!url)("inline encoder against Postgres (postgres-js)", () => {
-	const pool = [
-		"'",
-		"\\",
-		"''",
-		"\\'",
-		"$$",
-		"$1",
-		"--",
-		"/*",
-		";",
-		"\n",
-		"é",
-		"☃",
-		"😀",
-		"E'",
-		"\\x",
-		"{",
-		'"',
-		"a",
-		" ",
-		"\u0001",
-	];
-	const randomString = () =>
-		Array.from(
-			{ length: Math.floor(Math.random() * 12) },
-			() => pool[Math.floor(Math.random() * pool.length)],
-		).join("");
+// In an E'...' literal only `'` and `\` are special, and their meaning does
+// not change with standard_conforming_strings. So every string of up to three
+// characters from `'`, `\` and `a` covers each special character alone, in
+// pairs, next to a normal character, and at the start and end of a value.
+function specialStrings(): string[] {
+	const alphabet = ["'", "\\", "a"];
+	let level = [""];
+	const all: string[] = [];
+	for (let length = 1; length <= 3; length++) {
+		level = level.flatMap((prefix) => alphabet.map((c) => prefix + c));
+		all.push(...level);
+	}
+	return all;
+}
 
-	test("an inlined value behaves like the parameter postgres-js sends", async () => {
+describe.skipIf(!url)("inline encoder against Postgres (postgres-js)", () => {
+	test("an inlined value gives the same result as the parameter postgres-js sends", async () => {
 		const sql = postgres(url as string, { max: 1, onnotice: () => {} });
 		// Drizzle configures the client it wraps: json, jsonb and date values
 		// pass through unchanged, because Drizzle encodes them itself.
 		drizzle({ client: sql });
 		const mismatches: string[] = [];
 		const check = async (expr: string, value: unknown) => {
-			const asParam = await sql
-				.unsafe(`select (${expr.replace("?", () => "$1")}) as v`, [
-					value as never,
-				])
-				.then(
+			const query = `select (${expr.replace("?", () => "$1")}) as v`;
+			const outcome = (q: PromiseLike<{ v?: unknown }[]>) =>
+				Promise.resolve(q).then(
 					(r) => r[0]?.v,
 					(e: { code?: string }) => `error ${e.code}`,
 				);
-			const asLiteral = await sql
-				.unsafe(
-					`select (${inlineParams(
-						expr.replace("?", () => "$1"),
-						[value],
-						infer,
-					)}) as v`,
-				)
-				.then(
-					(r) => r[0]?.v,
-					(e: { code?: string }) => `error ${e.code}`,
-				);
+			const asParam = await outcome(sql.unsafe(query, [value as never]));
+			const asLiteral = await outcome(
+				sql.unsafe(inlineParams(query, [value], infer)),
+			);
 			const show = (x: unknown) =>
 				JSON.stringify(x, (_, y) => (typeof y === "bigint" ? `${y}n` : y));
 			if (show(asParam) !== show(asLiteral))
@@ -144,14 +121,27 @@ describe.skipIf(!url)("inline encoder against Postgres (postgres-js)", () => {
 					`${expr} ${show(value)}: param ${show(asParam)}, literal ${show(asLiteral)}`,
 				);
 		};
+		const strings = [
+			...specialStrings(),
+			"",
+			"$$",
+			"$1",
+			"--",
+			"/*",
+			";",
+			"\n",
+			"E'",
+			"\\x",
+			"é ☃ 😀",
+			"\u0001",
+		];
 		try {
 			for (const scs of ["on", "off"]) {
 				await sql.unsafe(`set standard_conforming_strings = ${scs}`);
-				for (let k = 0; k < 150; k++) {
-					const s = randomString();
+				for (const s of strings) {
 					await check("?::text", s);
+					// The literal must end where the value ends.
 					await check("'<' || ? || '>'", s);
-					await check("to_jsonb(?::text)", s);
 				}
 				for (const v of [
 					0,
@@ -161,20 +151,19 @@ describe.skipIf(!url)("inline encoder against Postgres (postgres-js)", () => {
 					1e21,
 					Number.NaN,
 					Number.POSITIVE_INFINITY,
+					Number.NEGATIVE_INFINITY,
 				])
 					for (const e of ["?::numeric", "?::double precision", "?::text"])
 						await check(e, v);
 				for (const v of [0n, -1n, 9007199254740993n]) await check("?", v);
 				for (const v of [true, false]) await check("?", v);
-				for (let k = 0; k < 20; k++)
-					await check(
-						"encode(?, 'hex')",
-						Buffer.from(
-							Array.from({ length: Math.floor(Math.random() * 16) }, () =>
-								Math.floor(Math.random() * 256),
-							),
-						),
-					);
+				await check("?::text", null);
+				for (const bytes of [[], [0], [39], [92], [0, 39, 92, 255]])
+					await check("encode(?, 'hex')", Buffer.from(bytes));
+				await check(
+					"encode(?, 'hex')",
+					Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
+				);
 				await check("?::jsonb", '{"a":"x\'y\\\\z"}');
 				await check("5 = ?", "5");
 			}

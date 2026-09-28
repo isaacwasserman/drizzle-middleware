@@ -285,6 +285,28 @@ function withScope(
 	return done === "sync" ? body([]) : done.then(() => body([]));
 }
 
+/**
+ * Opens a nested transaction (a savepoint). In a scope, the scope's `before`
+ * must not run inside the savepoint: if the savepoint rolls back, it undoes
+ * `before`, and the later queries of the transaction run without it. So if
+ * `before` has not run yet, it runs first, on this transaction.
+ */
+function openNested(state: WrapState, open: () => unknown): unknown {
+	const { scope } = state;
+	if (scope === undefined) return open();
+	if (scope.beforeDone === undefined) {
+		const { before } = scope.statements;
+		if (before.length === 0) scope.beforeDone = "sync";
+		else {
+			const ran = runUnit(target(state), { before, after: [] }, []);
+			scope.beforeDone =
+				ran instanceof Promise ? ran.then(() => undefined) : "sync";
+		}
+	}
+	const done = scope.beforeDone;
+	return done === "sync" ? open() : done.then(open);
+}
+
 /** `wrapped.transaction(fn)`: the middleware runs once for the transaction. */
 function runTransaction(
 	state: WrapState,
@@ -487,19 +509,21 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		if (typeof nested === "function")
 			Object.defineProperty(db, "transaction", {
 				value: (fn: (tx: unknown) => unknown, ...rest: unknown[]) =>
-					Reflect.apply(nested, rawDb, [
-						(rawNested: unknown) => {
-							const nestedDb = asDrizzleDb(rawNested);
-							return fn(
-								wrapDb(nestedDb, {
-									...state,
-									session: nestedDb.session,
-									rawDb: nestedDb,
-								}),
-							);
-						},
-						...rest,
-					]),
+					openNested(state, () =>
+						Reflect.apply(nested, rawDb, [
+							(rawNested: unknown) => {
+								const nestedDb = asDrizzleDb(rawNested);
+								return fn(
+									wrapDb(nestedDb, {
+										...state,
+										session: nestedDb.session,
+										rawDb: nestedDb,
+									}),
+								);
+							},
+							...rest,
+						]),
+					),
 			});
 		// `SET TRANSACTION` must be the first statement of a transaction, so it
 		// runs without middleware. It reads no data (docs/design.md, section 4).

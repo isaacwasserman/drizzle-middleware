@@ -1,10 +1,10 @@
-// Copied from the v1 suite (e2e-pg.test.ts). Only the imports changed.
+// End-to-end behavior on PGlite.
 import { describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { defineRelations, eq, sql } from "drizzle-orm-beta";
 import { integer, pgTable, serial, text } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
-import { type Middleware, withMiddleware } from "../src/pg.ts";
+import { withMiddleware } from "../src/pg.ts";
 
 const users = pgTable("users", {
 	id: serial("id").primaryKey(),
@@ -34,41 +34,6 @@ async function createTestDb() {
 }
 
 describe("e2e: pglite middleware", () => {
-	test("select returns correctly typed rows", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values({ name: "Alice" });
-
-		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('flag', 'on') ON CONFLICT(key) DO UPDATE SET value = 'on'`,
-			],
-		}));
-
-		const rows = await wrapped.select().from(users);
-		expect(rows).toEqual([{ id: 1, name: "Alice" }]);
-	});
-
-	test("$count uses positional rows and still runs middleware", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values([{ name: "Alice" }, { name: "Bob" }]);
-		let middlewareRuns = 0;
-
-		const wrapped = withMiddleware(db, () => {
-			middlewareRuns++;
-			return {
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('count', 'ran') ON CONFLICT(key) DO UPDATE SET value = 'ran'`,
-				],
-			};
-		});
-
-		expect(await wrapped.$count(users)).toBe(2);
-		expect(middlewareRuns).toBe(1);
-		expect(await db.select().from(kvStore)).toEqual([
-			{ key: "count", value: "ran" },
-		]);
-	});
-
 	test("before and after run around the query, in order, in one transaction", async () => {
 		const db = await createTestDb();
 		const wrapped = withMiddleware(db, () => ({
@@ -115,29 +80,7 @@ describe("e2e: pglite middleware", () => {
 		expect(await db.select().from(users)).toEqual([]);
 	});
 
-	test("multiple queries each trigger middleware independently", async () => {
-		const db = await createTestDb();
-		let count = 0;
-
-		const wrapped = withMiddleware(db, () => {
-			count++;
-			return {
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES (${`call-${count}`}, ${String(count)}) ON CONFLICT(key) DO UPDATE SET value = ${String(count)}`,
-				],
-			};
-		});
-
-		await wrapped.insert(users).values({ name: "A" });
-		await wrapped.insert(users).values({ name: "B" });
-		await wrapped.select().from(users);
-
-		expect(count).toBe(3);
-		const kvRows = await db.select().from(kvStore).orderBy(kvStore.key);
-		expect(kvRows).toHaveLength(3);
-	});
-
-	test("user transaction: before/after run at boundaries", async () => {
+	test("db.transaction runs before and after once, around the whole transaction", async () => {
 		const db = await createTestDb();
 
 		const wrapped = withMiddleware(db, () => ({
@@ -159,7 +102,7 @@ describe("e2e: pglite middleware", () => {
 		expect(kvRows).toEqual([{ key: "phase", value: "after" }]);
 	});
 
-	test("set_config is visible to the main query via batch before", async () => {
+	test("transaction-local state from before is visible to the query", async () => {
 		const db = await createTestDb();
 		await db.insert(users).values({ name: "Leo" });
 
@@ -177,7 +120,7 @@ describe("e2e: pglite middleware", () => {
 		expect(rows).toEqual([{ name: "Leo", tenant: "acme" }]);
 	});
 
-	test("join with duplicate column labels maps correctly through the batch", async () => {
+	test("a join with duplicate column names maps both columns", async () => {
 		const db = await createTestDb();
 		await db.execute(
 			sql`CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL)`,
@@ -185,8 +128,7 @@ describe("e2e: pglite middleware", () => {
 		await db.insert(users).values({ name: "Nia" });
 		await db.insert(orders).values({ userId: 1 });
 
-		// Both tables expose an `id`; the batched multi-statement result must come
-		// back as positional array rows so neither `id` is dropped.
+		// Both tables have an `id` column; neither may be lost in the result.
 		const wrapped = withMiddleware(db, () => ({
 			before: [sql`SELECT set_config('app.x', '1', true)`],
 		}));
@@ -204,25 +146,7 @@ describe("e2e: pglite middleware", () => {
 		]);
 	});
 
-	test("executeBatchTransaction: join with duplicate column labels", async () => {
-		const db = await createTestDb();
-		await db.execute(
-			sql`CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL)`,
-		);
-		await db.insert(users).values({ name: "Omar" });
-		await db.insert(orders).values({ userId: 1 });
-
-		const { executeBatchTransaction } = await import("../src/pg.ts");
-		const [joined] = await executeBatchTransaction([
-			db.select().from(users).innerJoin(orders, eq(orders.userId, users.id)),
-		]);
-
-		expect(joined).toEqual([
-			{ users: { id: 1, name: "Omar" }, orders: { id: 1, userId: 1 } },
-		]);
-	});
-
-	test("composition: nested middleware applies both layers in one round trip", async () => {
+	test("stacked layers each run once, and the query sees both", async () => {
 		const db = await createTestDb();
 		await db.insert(users).values({ name: "Mia" });
 
@@ -347,6 +271,28 @@ describe("e2e: pglite fail-closed guard", () => {
 			});
 		});
 		expect(await middlewareRuns(db)).toBe(7);
+	});
+
+	test("a rolled-back savepoint does not undo the transaction's before", async () => {
+		const db = await createTestDb();
+		const wrapped = withMiddleware(db, () => ({
+			before: [sql`select set_config('app.tenant', 'acme', true)`],
+		}));
+		const tenant = async (q: Pick<typeof db, "execute">) =>
+			(
+				await q.execute<{ t: string }>(
+					sql`select current_setting('app.tenant', true) as t`,
+				)
+			).rows[0]?.t;
+		await wrapped.transaction(async (tx) => {
+			await expect(
+				tx.transaction(async (savepoint) => {
+					expect(await tenant(savepoint)).toBe("acme");
+					throw new Error("roll back the savepoint");
+				}),
+			).rejects.toThrow("roll back the savepoint");
+			expect(await tenant(tx)).toBe("acme");
+		});
 	});
 
 	test("nested transaction on a wrapped transaction runs the middleware", async () => {

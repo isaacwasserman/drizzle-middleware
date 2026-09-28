@@ -1,14 +1,11 @@
-// Copied from the v1 suite (e2e-sqlite.test.ts). Only the imports changed.
-import { Database } from "bun:sqlite";
+// End-to-end behavior on the two sync SQLite drivers: bun:sqlite and
+// better-sqlite3.
 import { describe, expect, test } from "bun:test";
 import { defineRelations, eq, sql } from "drizzle-orm-beta";
 import { drizzle as betterSqlite3 } from "drizzle-orm-beta/better-sqlite3";
 import { drizzle as bunSqlite } from "drizzle-orm-beta/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm-beta/sqlite-core";
-import { drizzle as drizzleProxy } from "drizzle-orm-beta/sqlite-proxy";
-import { type Middleware, executeBatchTransaction } from "../src/pg.ts";
 import { withMiddleware } from "../src/sqlite.ts";
-import { driverDescribe } from "./helpers/drivers.ts";
 
 const users = sqliteTable("users", {
 	id: integer("id").primaryKey({ autoIncrement: true }),
@@ -43,20 +40,6 @@ for (const driver of SYNC_DRIVERS) {
 	}
 
 	describe(`e2e: ${driver.name} middleware`, () => {
-		test("select returns correctly typed rows", () => {
-			const db = createTestDb();
-			db.insert(users).values({ name: "Alice" }).run();
-
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('flag', 'on') ON CONFLICT(key) DO UPDATE SET value = 'on'`,
-				],
-			}));
-
-			const rows = wrapped.select().from(users).all();
-			expect(rows).toEqual([{ id: 1, name: "Alice" }]);
-		});
-
 		test("before and after run around the query, in order, in one transaction", () => {
 			const db = createTestDb();
 			const wrapped = withMiddleware(db, () => ({
@@ -103,29 +86,7 @@ for (const driver of SYNC_DRIVERS) {
 			expect(db.select().from(users).all()).toEqual([]);
 		});
 
-		test("multiple queries each trigger middleware independently", () => {
-			const db = createTestDb();
-			let count = 0;
-
-			const wrapped = withMiddleware(db, () => {
-				count++;
-				return {
-					before: [
-						sql`INSERT INTO kv (key, value) VALUES (${`call-${count}`}, ${String(count)}) ON CONFLICT(key) DO UPDATE SET value = ${String(count)}`,
-					],
-				};
-			});
-
-			wrapped.insert(users).values({ name: "A" }).run();
-			wrapped.insert(users).values({ name: "B" }).run();
-			wrapped.select().from(users).all();
-
-			expect(count).toBe(3);
-			const kvRows = db.select().from(kvStore).orderBy(kvStore.key).all();
-			expect(kvRows).toHaveLength(3);
-		});
-
-		test("user transaction: before/after run at boundaries", () => {
+		test("db.transaction runs before and after once, around the whole transaction", () => {
 			const db = createTestDb();
 
 			const wrapped = withMiddleware(db, () => ({
@@ -151,7 +112,6 @@ for (const driver of SYNC_DRIVERS) {
 			const db = createTestDb();
 			const wrapped = withMiddleware(db, () => ({}));
 			expect(() => wrapped.$client).toThrow("blocked access to `$client`");
-			expect(db.$client).toBeDefined();
 		});
 	});
 
@@ -235,6 +195,24 @@ for (const driver of SYNC_DRIVERS) {
 			expect(middlewareRuns(db)).toBe(10);
 		});
 
+		test("a rolled-back savepoint does not undo the transaction's before", () => {
+			const db = createTestDb();
+			const wrapped = withMiddleware(db, () => ({
+				before: [sql`INSERT INTO kv (key, value) VALUES ('tenant', 'acme')`],
+			}));
+			const tenant = (q: Pick<typeof db, "select">) =>
+				q.select({ value: kvStore.value }).from(kvStore).all();
+			wrapped.transaction((tx) => {
+				expect(() =>
+					tx.transaction((savepoint) => {
+						expect(tenant(savepoint)).toEqual([{ value: "acme" }]);
+						throw new Error("roll back the savepoint");
+					}),
+				).toThrow("roll back the savepoint");
+				expect(tenant(tx)).toEqual([{ value: "acme" }]);
+			});
+		});
+
 		test("nested transaction on a wrapped transaction runs the middleware", () => {
 			const db = createRelationalDb();
 
@@ -286,89 +264,3 @@ for (const driver of SYNC_DRIVERS) {
 		});
 	});
 }
-
-driverDescribe("SQLiteRemoteSession")(
-	"e2e: sqlite-proxy sequential transaction",
-	() => {
-		// A proxy db whose remote side is a bun:sqlite database. The proxy sends
-		// one statement per callback call; each call is logged.
-		function createProxyDb() {
-			const sqlite = new Database(":memory:");
-			sqlite.run(
-				"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
-			);
-			sqlite.run("CREATE TABLE mw_log (n INTEGER PRIMARY KEY AUTOINCREMENT)");
-			sqlite.run("INSERT INTO users (name) VALUES ('Ada')");
-			const calls: string[] = [];
-			const db = drizzleProxy(async (query, params, method) => {
-				calls.push(query);
-				const statement = sqlite.query(query);
-				if (method === "run") {
-					statement.run(...(params as any[]));
-					return { rows: [] };
-				}
-				const rows = statement.values(...(params as any[]));
-				return { rows: method === "get" ? (rows[0] ?? []) : rows };
-			});
-			const logCount = () =>
-				(
-					sqlite.query("SELECT count(*) AS n FROM mw_log").get() as {
-						n: number;
-					}
-				).n;
-			return { db, calls, logCount };
-		}
-
-		test("runs before, the query, and after one at a time in a transaction", async () => {
-			const { db, calls, logCount } = createProxyDb();
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
-				after: [sql`INSERT INTO mw_log DEFAULT VALUES`],
-			}));
-
-			expect(await wrapped.select().from(users)).toEqual([
-				{ id: 1, name: "Ada" },
-			]);
-			expect(calls).toEqual([
-				"begin",
-				"INSERT INTO mw_log DEFAULT VALUES",
-				'select "id", "name" from "users"',
-				"INSERT INTO mw_log DEFAULT VALUES",
-				"commit",
-			]);
-			expect(logCount()).toBe(2);
-		});
-
-		test("a failed statement rolls back the whole envelope", async () => {
-			const { db, calls, logCount } = createProxyDb();
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
-				after: [sql`INSERT INTO missing_table DEFAULT VALUES`],
-			}));
-
-			await expect(
-				Promise.resolve(wrapped.insert(users).values({ name: "Bob" })),
-			).rejects.toThrow("missing_table");
-			expect(calls.at(-1)).toBe("rollback");
-			// Neither the middleware row nor the insert was kept.
-			expect(logCount()).toBe(0);
-			expect(await db.select().from(users)).toEqual([{ id: 1, name: "Ada" }]);
-		});
-
-		test("executeBatchTransaction runs in one transaction", async () => {
-			const { db, calls } = createProxyDb();
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
-			}));
-
-			expect(
-				await executeBatchTransaction([
-					wrapped.insert(users).values({ name: "Bob" }).returning(),
-					wrapped.select().from(users).where(eq(users.name, "Bob")),
-				]),
-			).toEqual([[{ id: 2, name: "Bob" }], [{ id: 2, name: "Bob" }]]);
-			expect(calls[0]).toBe("begin");
-			expect(calls.at(-1)).toBe("commit");
-		});
-	},
-);

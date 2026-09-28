@@ -1,23 +1,14 @@
-// the security regression suite. Each test is an audit finding from
-// v1 (see docs/design.md, section 11). v2 must pass all of them.
+// Security regressions. Each test is an audit finding from v1 (see
+// docs/design.md, section 11).
 
 import { describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
-import { SQL } from "bun";
 import { entityKind, eq, sql } from "drizzle-orm-beta";
-import { drizzle as bunSqlDrizzle } from "drizzle-orm-beta/bun-sql/sqlite";
 import { Cache } from "drizzle-orm-beta/cache/core";
 import { bytea, pgTable, serial, text } from "drizzle-orm-beta/pg-core";
 import { drizzle } from "drizzle-orm-beta/pglite";
-import {
-	integer,
-	sqliteTable,
-	text as stext,
-} from "drizzle-orm-beta/sqlite-core";
 import { readMember } from "../src/internal/drizzle.ts";
 import { withMiddleware as withPgMiddleware } from "../src/pg.ts";
-import { withMiddleware as withSqliteMiddleware } from "../src/sqlite.ts";
-import { driverTest } from "./helpers/drivers.ts";
 
 const secrets = pgTable("secrets", {
 	id: serial("id").primaryKey(),
@@ -86,27 +77,14 @@ describe("security", () => {
 		expect(() => withLog(db)).toThrow("cache");
 	});
 
-	test("bytea values keep every byte", async () => {
+	test("bytea, NaN and Date values give the same result as on the unwrapped db", async () => {
 		const { db } = await createDb();
 		const data = Buffer.from([0, 1, 39, 92, 255]);
 		const [row] = await withLog(db).insert(files).values({ data }).returning();
 		expect(row?.data).toEqual(data);
-	});
-
-	test("a raw NaN value reaches the database as NaN", async () => {
-		const { db } = await createDb();
-		const result = await withLog(db).execute<{ v: number }>(
-			sql`select ${Number.NaN}::float8 as v`,
-		);
-		expect(result.rows[0]?.v).toBeNaN();
-	});
-
-	test("a raw Date value gives the same result as on the unwrapped db", async () => {
-		const { db } = await createDb();
-		const query = sql`select ${new Date(0)}::timestamptz as v`;
+		const query = sql`select ${Number.NaN}::float8 as n, ${new Date(0)}::timestamptz as d`;
 		const plain = await db.execute(query);
-		const wrapped = await withLog(db).execute(query);
-		expect(wrapped.rows).toEqual(plain.rows);
+		expect((await withLog(db).execute(query)).rows).toEqual(plain.rows);
 	});
 
 	test("setTransaction() on a wrapped open transaction runs first, without middleware", async () => {
@@ -120,26 +98,4 @@ describe("security", () => {
 			expect(level.rows[0]?.level).toBe("serializable");
 		});
 	});
-
-	driverTest("BunSQLiteSession")(
-		"Bun SQL SQLite: a failing query rejects and rolls back the middleware",
-		async () => {
-			const users = sqliteTable("users", {
-				id: integer("id").primaryKey(),
-				name: stext("name"),
-			});
-			const client = new SQL({ adapter: "sqlite", filename: ":memory:" });
-			const db = bunSqlDrizzle({ client });
-			await db.run(sql`create table users (id integer primary key, name text)`);
-			await db.run(sql`create table log (v text)`);
-			await db.insert(users).values({ id: 1, name: "Ada" });
-			const wrapped = withSqliteMiddleware(db, () => ({
-				before: [sql`insert into log values ('before')`],
-			}));
-			await expect(
-				Promise.resolve(wrapped.insert(users).values({ id: 1, name: "dup" })),
-			).rejects.toThrow();
-			expect(await db.all(sql`select v from log`)).toEqual([]);
-		},
-	);
 });

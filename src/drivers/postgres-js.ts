@@ -222,6 +222,12 @@ const prepareDisabled = (client: unknown) =>
 const POSTGRES_JS: DriverRules = {
 	sessionKind: "PostgresJsSession",
 	inference: postgresJsInference,
+	// Only `prepare: false` inlines values. postgres-js sets `options` only on
+	// the top-level client, so a transaction or reserved client uses
+	// "prepared". That is correct with both settings: postgres-js applies the
+	// client's `prepare: false` to every query on the connection. It is slower
+	// there, because postgres-js waits for a Describe for each statement with
+	// parameters.
 	mode: (client) => (prepareDisabled(client) ? "inline" : "prepared"),
 };
 

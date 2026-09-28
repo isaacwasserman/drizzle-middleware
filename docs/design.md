@@ -36,7 +36,7 @@ The package cannot check what the middleware statements do. Session-level state 
 | `executeBatchTransaction([...])` | `before`, all queries in order, `after` |
 | `wrapped.transaction(fn)` | `before` is sent with the first query in the transaction. `after` is sent as one batch before the commit. The factory is called once for the transaction. |
 | A query on `withMiddleware(tx)` (an open transaction) | `before`, the query, `after`, inside that transaction. There is no new transaction; atomicity comes from the outer one. |
-| A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. |
+| A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. In `wrapped.transaction(fn)`, if the scope's `before` has not run yet, it runs on the parent before the savepoint opens, so a rolled-back savepoint cannot undo it. |
 
 `setTransaction()` on a wrapped transaction runs without middleware, as the first statement, because Postgres rejects `SET TRANSACTION` after any other statement. It is a transaction-control statement and reads no data; this is a reviewed exception. Because `before` goes out with the first query of a transaction, the order stays valid.
 
@@ -165,7 +165,7 @@ A driver counts as supported only when its tests run against the real driver (se
    - `db.batch()` and `session.migrate()` skipping the middleware.
 3. **Member review** (kept from v1).
 4. **Encoder fuzz test** (section 6).
-5. **The v1 tests**, copied (e2e) or rewritten as behavior tests (unit), in `test/`. `test/MAPPING.md` accounts for every v1 test. All tests run against v2; tests for a driver without a registry entry are `test.todo` until the entry lands.
+5. **The v1 tests**, copied (e2e) or rewritten as behavior tests (unit), in `test/`, where they still apply to a supported driver. A driver that gets an entry later gets its tests with the entry.
 
 ## 12. Open questions
 

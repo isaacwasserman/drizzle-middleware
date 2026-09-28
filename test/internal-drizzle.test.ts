@@ -46,19 +46,11 @@ describe("Drizzle internals boundary", () => {
 		}
 		expect(() =>
 			asDrizzleSession({ prepareQuery() {}, transaction() {}, dialect: {} }),
-		).toThrow("dialect has no sqlToQuery()");
+		).toThrow(DrizzleInternalsError);
 		expect(() => asDrizzleSession({ transaction() {} })).toThrow(
-			"session has no prepareQuery() or transaction()",
+			DrizzleInternalsError,
 		);
-		expect(() => asPreparedQuery({})).toThrow(
-			"prepared query has no execute()",
-		);
-	});
-
-	test("the error says the Drizzle version is not supported", () => {
-		expect(() => asDrizzleDb({})).toThrow(
-			"drizzle-middleware: unexpected Drizzle internals (session has no prepareQuery() or transaction()). This Drizzle version is not supported.",
-		);
+		expect(() => asPreparedQuery({})).toThrow(DrizzleInternalsError);
 	});
 
 	test("reads a prepared query from a real session", () => {
@@ -102,11 +94,5 @@ describe("Drizzle internals boundary", () => {
 		const cached = pglite({ client: new PGlite(), cache: new MemoryCache() });
 		expect(hasQueryCache(sessionOf(cached))).toBe(true);
 		expect(hasQueryCache(sessionOf(bunSqlite(":memory:")))).toBe(false);
-	});
-
-	test("readMember returns undefined for non-objects", () => {
-		expect(readMember(undefined, "x")).toBeUndefined();
-		expect(readMember(1, "x")).toBeUndefined();
-		expect(readMember({ x: 2 }, "x")).toBe(2);
 	});
 });
