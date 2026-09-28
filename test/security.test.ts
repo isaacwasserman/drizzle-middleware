@@ -18,7 +18,6 @@ const files = pgTable("files", {
 	id: serial("id").primaryKey(),
 	data: bytea("data"),
 });
-const log = pgTable("log", { n: serial("n").primaryKey(), v: text("v") });
 
 // One PGlite database for the file, because each one takes about half a
 // second to start. Each test gets an empty schema and the default settings.

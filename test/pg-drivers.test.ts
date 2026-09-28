@@ -1,5 +1,6 @@
-// The same behavior on every TCP Postgres driver, against a real Postgres,
-// including the round-trip check.
+// Behavior that the TCP Postgres drivers have and the other drivers do not:
+// session settings, SQL injection, bytea, and one round trip per unit. The
+// behavior that all drivers share is in drivers.test.ts.
 //
 // Runs only when TEST_PG_URL is set, e.g.
 //   TEST_PG_URL=postgres://postgres@127.0.0.1:5432/postgres bun test
@@ -19,7 +20,7 @@ import {
 import { drizzle as postgresJs } from "drizzle-orm-beta/postgres-js";
 import pg from "pg";
 import postgres from "postgres";
-import { executeBatchTransaction, withMiddleware } from "../src/pg.ts";
+import { withMiddleware } from "../src/pg.ts";
 import { startLatencyProxy } from "./helpers/latency-proxy.ts";
 
 const url = process.env.TEST_PG_URL;
@@ -128,10 +129,6 @@ for (const driver of drivers) {
 
 		const insertLog = (v: string) =>
 			sql`insert into ${t.log} (v) values (${v})`;
-		const logged = async () =>
-			(await db.select({ v: t.log.v }).from(t.log).orderBy(t.log.n)).map(
-				(r: { v: string }) => r.v,
-			);
 
 		beforeAll(async () => {
 			connected = driver.connect(url as string);
@@ -171,29 +168,6 @@ for (const driver of drivers) {
 			);
 		};
 
-		test("before, the query, and after run in order", async () => {
-			await reset();
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("before")],
-				after: [insertLog("after")],
-			}));
-			await wrapped.execute(insertLog("query"));
-			expect(await logged()).toEqual(["before", "query", "after"]);
-		});
-
-		test("a failing after statement rolls back the whole unit", async () => {
-			await reset();
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("before")],
-				after: [sql`select 1/0`],
-			}));
-			await expect(
-				Promise.resolve(wrapped.insert(t.users).values({ name: "Ada" })),
-			).rejects.toThrow();
-			expect(await logged()).toEqual([]);
-			expect(await db.select().from(t.users)).toEqual([]);
-		});
-
 		test("transaction-local state reaches the query and is gone after", async () => {
 			const wrapped = withMiddleware(db, () => ({
 				before: [sql`select set_config('app.tenant', ${"acme"}, true)`],
@@ -208,30 +182,6 @@ for (const driver of drivers) {
 			expect(Array.from(after.rows ?? after)[0]).toMatchObject({ v: "" });
 		});
 
-		test("the result is the query's, not a middleware statement's", async () => {
-			await reset();
-			await db.insert(t.users).values({ name: "Ada" });
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`select set_config('app.tenant', ${"acme"}, true)`,
-					insertLog("before"),
-				],
-				after: [sql`select 'after' as name`],
-			}));
-			expect(
-				await wrapped.select({ name: t.users.name }).from(t.users),
-			).toEqual([{ name: "Ada" }]);
-		});
-
-		test("$count returns the count", async () => {
-			await reset();
-			await db.insert(t.users).values([{ name: "Ada" }, { name: "Bob" }]);
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("b")],
-			}));
-			expect(await wrapped.$count(t.users)).toBe(2);
-		});
-
 		test("raw execute returns the same rows as the unwrapped db", async () => {
 			await reset();
 			await db.insert(t.users).values({ name: "Ada" });
@@ -243,102 +193,6 @@ for (const driver of drivers) {
 			expect(Array.from(wrapped.rows ?? wrapped)).toEqual(
 				Array.from(plain.rows ?? plain),
 			);
-		});
-
-		test("a join with duplicate column labels maps correctly", async () => {
-			await reset();
-			await db.insert(t.users).values({ name: "Ada" });
-			await db.insert(t.posts).values({ userId: 1, name: "post" });
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("b")],
-			}));
-			expect(
-				await wrapped
-					.select({ user: t.users.name, post: t.posts.name })
-					.from(t.users)
-					.innerJoin(t.posts, eq(t.posts.userId, t.users.id)),
-			).toEqual([{ user: "Ada", post: "post" }]);
-		});
-
-		test("executeBatchTransaction runs the queries and the middleware as one unit", async () => {
-			await reset();
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("before")],
-				after: [insertLog("after")],
-			}));
-			const [inserted, names] = await executeBatchTransaction([
-				wrapped.insert(t.users).values({ name: "Ada" }).returning(),
-				wrapped.select({ name: t.users.name }).from(t.users),
-			]);
-			expect(inserted).toEqual([{ id: 1, name: "Ada" }]);
-			expect(names).toEqual([{ name: "Ada" }]);
-			expect(await logged()).toEqual(["before", "after"]);
-
-			// A failing query rolls back the whole batch.
-			await expect(
-				executeBatchTransaction([
-					wrapped.insert(t.users).values({ name: "Bob" }),
-					// The same primary key as Ada's row.
-					wrapped
-						.insert(t.users)
-						.values({ id: 1, name: "Duplicate" }),
-				]),
-			).rejects.toThrow();
-			expect(await db.select().from(t.users)).toHaveLength(1);
-			expect(await logged()).toEqual(["before", "after"]);
-		});
-
-		test("a relational query runs the middleware", async () => {
-			await reset();
-			await db.insert(t.users).values({ name: "Ada" });
-			await db.insert(t.posts).values({ userId: 1, name: "post" });
-			const wrapped = withMiddleware(db, () => ({
-				before: [insertLog("b")],
-			}));
-			expect(
-				await wrapped.query.users.findMany({
-					with: { posts: { columns: { name: true } } },
-				}),
-			).toEqual([{ id: 1, name: "Ada", posts: [{ name: "post" }] }]);
-			expect(await logged()).toEqual(["b"]);
-		});
-
-		test("a wrapped open transaction runs before and after around each query, in it", async () => {
-			await reset();
-			await expect(
-				db.transaction(async (tx: any) => {
-					const wrapped = withMiddleware(tx, () => ({
-						before: [insertLog("before")],
-						after: [insertLog("after")],
-					}));
-					await wrapped.execute(insertLog("query"));
-					await wrapped.query.users.findMany();
-					throw new Error("roll back");
-				}),
-			).rejects.toThrow("roll back");
-			expect(await logged()).toEqual([]);
-		});
-
-		const tenant = async (q: any) => {
-			const r = await q.execute(
-				sql`select current_setting('app.tenant', true) as t`,
-			);
-			return (r.rows ?? r)[0]?.t;
-		};
-
-		test("a rolled-back savepoint does not undo the transaction's before", async () => {
-			const wrapped = withMiddleware(db, () => ({
-				before: [sql`select set_config('app.tenant', 'acme', true)`],
-			}));
-			await wrapped.transaction(async (tx: any) => {
-				await expect(
-					tx.transaction(async (savepoint: any) => {
-						expect(await tenant(savepoint)).toBe("acme");
-						throw new Error("roll back the savepoint");
-					}),
-				).rejects.toThrow("roll back the savepoint");
-				expect(await tenant(tx)).toBe("acme");
-			});
 		});
 
 		test("a wrapped open transaction accepts the same values as the driver", async () => {
@@ -357,19 +211,6 @@ for (const driver of drivers) {
 				const plain = await outcome(tx.execute(q));
 				expect(await outcome(wrapped.execute(q))).toEqual(plain);
 			});
-		});
-
-		test("a nested transaction on a wrapped open transaction runs the middleware", async () => {
-			await reset();
-			await db.transaction(async (tx: any) => {
-				const wrapped = withMiddleware(tx, () => ({
-					before: [insertLog("before")],
-				}));
-				await wrapped.transaction(async (savepoint: any) => {
-					await savepoint.execute(insertLog("in savepoint"));
-				});
-			});
-			expect(await logged()).toEqual(["before", "in savepoint"]);
 		});
 
 		test("a value cannot inject SQL, even with standard_conforming_strings off", async () => {

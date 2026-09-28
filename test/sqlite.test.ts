@@ -112,4 +112,12 @@ describe("withMiddleware (sqlite)", () => {
 		expect(() => prepared.stmt).toThrow("blocked access to `stmt`");
 		expect(() => prepared.allRqbV2).toThrow("blocked access to `allRqbV2`");
 	});
+
+	test("session members that reach the driver are blocked", () => {
+		const session = readMember(
+			withMiddleware(createDb(), () => ({})),
+			"session",
+		) as Record<string, unknown>;
+		expect(() => session.exec).toThrow("blocked access to `exec`");
+	});
 });

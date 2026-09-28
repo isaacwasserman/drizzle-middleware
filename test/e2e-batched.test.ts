@@ -88,32 +88,6 @@ describe("executeBatchTransaction: pglite", () => {
 		expect(results).toEqual([]);
 	});
 
-	test("the middleware of a wrapped db runs once around the whole batch", async () => {
-		const base = await createPgDb();
-
-		let mwCalls = 0;
-		const wrapped = withMiddleware(base, () => {
-			mwCalls++;
-			return {
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('mw', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
-				],
-				after: [sql`UPDATE kv SET value = '2' WHERE key = 'mw'`],
-			};
-		});
-
-		const [ins, rows] = await executeBatchTransaction([
-			wrapped.insert(users).values({ name: "Alice" }).returning(),
-			wrapped.select().from(users),
-		]);
-
-		expect(ins).toEqual([{ id: 1, name: "Alice" }]);
-		expect(rows).toEqual([{ id: 1, name: "Alice" }]);
-
-		expect(mwCalls).toBe(1);
-		expect(await base.select().from(kv)).toEqual([{ key: "mw", value: "2" }]);
-	});
-
 	test("rejects a value that is not a query builder", async () => {
 		const db = await createPgDb();
 		const wrapped = withMiddleware(db, () => ({}));

@@ -114,7 +114,7 @@ A driver counts as supported only when its tests run against the real driver (se
   - Anything else throws: objects, arrays, `Date` (Drizzle's postgres-js client passes dates through unchanged, so their text form is not defined), strings with NUL, symbols, functions.
   - The encoder never passes a string as the replacement argument of `String.replace` (`$$` would become `$`).
   - Known difference: an untyped `NULL` literal succeeds where an untyped `NULL` parameter fails (error 42P18). This is more permissive and does not change data.
-- **Fuzz test** (`test/pg-inline.test.ts`): through a postgres-js client configured by Drizzle, an inlined value must give the same result as the parameter, for random strings, bytes, numbers, bigints and booleans, with `standard_conforming_strings` on and off.
+- **Fixed cases** (`test/pg-inline.test.ts`): through a postgres-js client configured by Drizzle, an inlined value must give the same result as the parameter, with `standard_conforming_strings` on and off. In an `E'…'` literal only `'` and `\` are special, so the strings are every string of up to three characters from `'`, `\` and `a`, plus fixed strings. Numbers, bigints, booleans, bytes and null have fixed cases too.
 
 ## 7. Middleware factory
 
@@ -154,7 +154,7 @@ A driver counts as supported only when its tests run against the real driver (se
 
 ## 11. Tests
 
-1. **Real-driver tests** for each driver entry, against the real driver: Postgres in CI (service container) for node-postgres, postgres-js and Bun SQL; the Neon wsproxy container for neon-serverless; local libSQL; PGlite; bun:sqlite; Bun SQL SQLite. Each checks the guarantees in section 3 and the round-trip count (through a latency proxy).
+1. **The driver matrix** (`test/drivers.test.ts`): each test of the shared behavior runs on every supported driver, against the real driver (Postgres in CI for the TCP drivers). Driver-specific behavior has its own file: the round-trip count through a counting proxy (`pg-drivers.test.ts`), the sync SQLite transaction rules (`e2e-sqlite.test.ts`), the Bun SQL SQLite queue (`e2e-bun-sql-sqlite.test.ts`), and concurrency (`concurrency.test.ts`).
 2. **Security regression suite.** Each audit finding becomes a test:
    - replay of a previous query after `toSQL()` or a batch;
    - SQL injection with `standard_conforming_strings = off`;
@@ -164,7 +164,7 @@ A driver counts as supported only when its tests run against the real driver (se
    - `bytea`, blob, `NaN` and `Date` values;
    - `db.batch()` and `session.migrate()` skipping the middleware.
 3. **Member review** (kept from v1).
-4. **Encoder fuzz test** (section 6).
+4. **Encoder tests** with fixed cases (section 6).
 5. **The v1 tests**, copied (e2e) or rewritten as behavior tests (unit), in `test/`, where they still apply to a supported driver. A driver that gets an entry later gets its tests with the entry.
 
 ## 12. Open questions

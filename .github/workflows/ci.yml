@@ -42,7 +42,7 @@ jobs:
     test:
         runs-on: ubuntu-latest
         services:
-            # For the real-driver tests (test/pg-drivers.test.ts).
+            # For the TCP Postgres drivers in the tests.
             postgres:
                 image: postgres:16
                 env:

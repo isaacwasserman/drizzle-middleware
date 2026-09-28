@@ -64,17 +64,6 @@ describe("withMiddleware (pg)", () => {
 	// The wrapped db
 	// -------------------------------------------------------------------
 
-	test("blocks $client", async () => {
-		const { client, db } = await createDb();
-		const wrapped = withMiddleware(db, () => ({}));
-		expect(() => wrapped.$client).toThrow("blocked access to `$client`");
-		expect(db.$client).toBe(client);
-		// A wrapped db can be wrapped again.
-		expect(() => withMiddleware(wrapped, () => ({})).$client).toThrow(
-			"blocked access to `$client`",
-		);
-	});
-
 	test("keeps parseRqbJson of the input db and transaction", async () => {
 		const { db } = await createDb();
 		const dialect = readMember(db, "dialect");
@@ -184,20 +173,6 @@ describe("withMiddleware (pg)", () => {
 		expect(await logged(db)).toEqual(["shared", "shared"]);
 	});
 
-	test("a prepared query with placeholders runs with each set of values", async () => {
-		const { db } = await createDb();
-		await db.insert(users).values([{ name: "Ada" }, { name: "Bob" }]);
-		const wrapped = withMiddleware(db, () => ({ before: [insertLog("b")] }));
-		const byId = wrapped
-			.select({ name: users.name })
-			.from(users)
-			.where(eq(users.id, sql.placeholder("id")))
-			.prepare("test_by_id");
-		expect(await byId.execute({ id: 1 })).toEqual([{ name: "Ada" }]);
-		expect(await byId.execute({ id: 2 })).toEqual([{ name: "Bob" }]);
-		expect(await logged(db)).toEqual(["b", "b"]);
-	});
-
 	test("a left join without a match maps the joined table to null", async () => {
 		const { db } = await createDb();
 		await db.insert(users).values({ name: "Ada" });
@@ -210,15 +185,20 @@ describe("withMiddleware (pg)", () => {
 		).toEqual([{ users: { id: 1, name: "Ada" }, posts: null }]);
 	});
 
-	test("after-only middleware returns the query's result", async () => {
+	test("transaction-local state from before is visible to the query", async () => {
 		const { db } = await createDb();
 		await db.insert(users).values({ name: "Ada" });
 		const wrapped = withMiddleware(db, () => ({
-			after: [sql`select 'after' as name`],
+			before: [sql`select set_config('app.tenant', 'acme', true)`],
 		}));
-		expect(await wrapped.select({ name: users.name }).from(users)).toEqual([
-			{ name: "Ada" },
-		]);
+		expect(
+			await wrapped
+				.select({
+					name: users.name,
+					tenant: sql<string>`current_setting('app.tenant')`,
+				})
+				.from(users),
+		).toEqual([{ name: "Ada", tenant: "acme" }]);
 	});
 
 	test("raw execute returns the same result as the unwrapped db", async () => {
@@ -253,28 +233,6 @@ describe("withMiddleware (pg)", () => {
 	});
 
 	describe("a wrapped open transaction (tx input)", () => {
-		test("before and after run around each query, in order, in that transaction", async () => {
-			const { db } = await createDb();
-			await expect(
-				db.transaction(async (tx) => {
-					const wrapped = withMiddleware(tx, () => ({
-						before: [insertLog("before 1"), insertLog("before 2")],
-						after: [insertLog("after")],
-					}));
-					await wrapped.execute(insertLog("query"));
-					expect(await logged(tx as any)).toEqual([
-						"before 1",
-						"before 2",
-						"query",
-						"after",
-					]);
-					throw new Error("roll back the outer transaction");
-				}),
-			).rejects.toThrow("roll back the outer transaction");
-			// Everything ran inside the outer transaction.
-			expect(await logged(db)).toEqual([]);
-		});
-
 		test("the result is the query's, not the middleware's", async () => {
 			const { db } = await createDb();
 			await db.insert(users).values({ name: "Ada" });
@@ -311,20 +269,6 @@ describe("withMiddleware (pg)", () => {
 				]);
 			});
 			expect(await logged(db)).toEqual([]);
-		});
-
-		test("relational queries run the middleware", async () => {
-			const { db } = await createDb();
-			await db.insert(users).values({ name: "Ada" });
-			await db.transaction(async (tx) => {
-				const wrapped = withMiddleware(tx, () => ({
-					before: [insertLog("b")],
-				}));
-				expect(await wrapped.query.users.findMany()).toEqual([
-					{ id: 1, name: "Ada" },
-				]);
-			});
-			expect(await logged(db)).toEqual(["b"]);
 		});
 	});
 
