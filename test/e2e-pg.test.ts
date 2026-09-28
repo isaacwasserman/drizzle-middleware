@@ -301,6 +301,21 @@ describe("e2e: pglite fail-closed guard", () => {
 		});
 	});
 
+	test("a tx kept after its transaction ends cannot send queries", async () => {
+		const db = await createRelationalDb();
+		let kept: any;
+		await withMiddleware(db, () => ({
+			before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+		})).transaction(async (tx) => {
+			kept = tx;
+		});
+		const runs = await middlewareRuns(db);
+		await expect(Promise.resolve(kept.select().from(users))).rejects.toThrow(
+			"the transaction has ended",
+		);
+		expect(await middlewareRuns(db)).toBe(runs);
+	});
+
 	test("nested transaction on a wrapped transaction runs the middleware", async () => {
 		const db = await createRelationalDb();
 

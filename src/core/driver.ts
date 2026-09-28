@@ -95,6 +95,8 @@ export interface SyncTransactionDriver {
 	readonly mode: "sync";
 	readonly strategy: "local-transaction";
 	run<T>(session: DrizzleSession, body: (txSession: DrizzleSession) => T): T;
+	/** True when the session's connection is inside a transaction. */
+	isOpen(session: DrizzleSession): boolean;
 }
 
 /** An async driver whose unit runs inside a transaction, one call per statement. */

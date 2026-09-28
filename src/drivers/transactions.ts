@@ -76,4 +76,11 @@ export const drizzleSyncTransaction: SyncTransactionDriver = {
 		if (box.result === undefined) throw noCallback();
 		return box.result.value;
 	},
+	isOpen(session: DrizzleSession): boolean {
+		// bun:sqlite and better-sqlite3 both have `inTransaction`.
+		const open = readMember(readMember(session, "client"), "inTransaction");
+		if (typeof open !== "boolean")
+			throw new DrizzleInternalsError("the SQLite client has no inTransaction");
+		return open;
+	},
 };

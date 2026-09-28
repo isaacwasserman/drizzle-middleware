@@ -77,7 +77,11 @@ async function transactions(): Promise<void> {
 		requireWrapped(tx);
 		return "sync";
 	});
-	void [n, s, t];
+	const rows: number[] = syncWrapped.transaction(() => [1]);
+	syncWrapped.transaction(() => {});
+	// @ts-expect-error -- a sync driver commits when the callback returns
+	syncWrapped.transaction(async () => {});
+	void [n, s, t, rows];
 }
 
 // -----------------------------------------------------------------------

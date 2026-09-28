@@ -213,6 +213,62 @@ for (const driver of SYNC_DRIVERS) {
 			});
 		});
 
+		// The driver commits when the callback returns, so an async callback's
+		// queries after an `await` would run after the commit.
+		test("an async transaction callback throws, rolls back, and cannot send more queries", async () => {
+			const db = createRelationalDb();
+			const wrapped = withMiddleware(db, () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			}));
+			let later: Promise<string> = Promise.resolve("not sent");
+			expect(() =>
+				// @ts-expect-error -- the wrong use, as a caller without types can make it
+				wrapped.transaction(async (tx) => {
+					tx.insert(users).values({ name: "Rolled back" }).run();
+					await Promise.resolve();
+					later = Promise.resolve(tx.select().from(users)).then(
+						() => "ran",
+						(error: Error) => error.message,
+					);
+				}),
+			).toThrow(TypeError);
+			await Bun.sleep(0);
+			expect(await later).toContain("the transaction has ended");
+			expect(db.select({ name: users.name }).from(users).all()).toEqual([
+				{ name: "Ada" },
+			]);
+			expect(middlewareRuns(db)).toBe(0);
+
+			wrapped.transaction((tx) => {
+				expect(() =>
+					// @ts-expect-error -- the wrong use, as a caller without types can make it
+					tx.transaction(async () => {}),
+				).toThrow(TypeError);
+			});
+		});
+
+		test("a tx kept after its transaction ends cannot send queries", () => {
+			const db = createRelationalDb();
+			const middleware = () => ({
+				before: [sql`INSERT INTO mw_log DEFAULT VALUES`],
+			});
+			let scoped: any;
+			withMiddleware(db, middleware).transaction((tx) => {
+				scoped = tx;
+			});
+			let wrappedRaw: any;
+			db.transaction((tx) => {
+				wrappedRaw = withMiddleware(tx, middleware);
+			});
+			// `before` ran once, at the commit of the transaction without queries.
+			const runs = middlewareRuns(db);
+			for (const kept of [scoped, wrappedRaw])
+				expect(() => kept.select().from(users).all()).toThrow(
+					"the transaction has ended",
+				);
+			expect(middlewareRuns(db)).toBe(runs);
+		});
+
 		test("nested transaction on a wrapped transaction runs the middleware", () => {
 			const db = createRelationalDb();
 

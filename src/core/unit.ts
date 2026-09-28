@@ -123,6 +123,13 @@ function statementStep(statement: SQL, rules: DialectRules): Step {
 	};
 }
 
+/** A query on a transaction that has ended, which would skip the middleware. */
+export function transactionEnded(): Error {
+	return new Error(
+		"drizzle-middleware: the transaction has ended. A query on its `tx` now would run outside the transaction, without the middleware.",
+	);
+}
+
 /**
  * Runs a unit and returns the result of each query item, in order. Returns a
  * promise, except for a sync driver, which returns the values directly.
@@ -159,11 +166,10 @@ export function runUnit(
 			if (driver.mode === "sync") {
 				const body = (session: DrizzleSession) =>
 					steps.map((step) => step(session));
-				return pick(
-					target.inTransaction
-						? body(target.session)
-						: driver.run(target.session, body),
-				);
+				if (!target.inTransaction)
+					return pick(driver.run(target.session, body));
+				if (!driver.isOpen(target.session)) throw transactionEnded();
+				return pick(body(target.session));
 			}
 			const body = async (session: DrizzleSession) => {
 				const values: unknown[] = [];

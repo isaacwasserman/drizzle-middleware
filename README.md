@@ -80,6 +80,8 @@ await baseDb.transaction(async (tx) => {
 
 `setTransaction()` on a wrapped transaction runs without middleware, because Postgres requires `SET TRANSACTION` to be the first statement of a transaction.
 
+A `tx` that you keep after its transaction ends throws on each query. On bun:sqlite and better-sqlite3, the transaction callback must be sync: the driver commits when the callback returns, so an async callback throws a `TypeError`, and its transaction rolls back.
+
 ## Stacking
 
 A wrapped db can be wrapped again. `before` runs outermost layer first, and `after` runs innermost layer first. The whole stack is still one unit.

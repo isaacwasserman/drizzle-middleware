@@ -31,6 +31,7 @@ import {
 	collectStatements,
 	isEmpty,
 	runUnit,
+	transactionEnded,
 } from "./unit.js";
 
 /** Everything that differs between Postgres and SQLite. */
@@ -59,6 +60,8 @@ interface Scope {
 	readonly statements: Statements;
 	/** Settles when `before` has run; `undefined` until the first query. */
 	beforeDone: Promise<void> | "sync" | undefined;
+	/** Set when the transaction has committed or rolled back. */
+	ended: boolean;
 }
 
 /** The state that a wrapped session carries. */
@@ -226,6 +229,24 @@ function target(state: WrapState) {
 const isSync = (state: WrapState) =>
 	state.driver.kind === "transaction" && state.driver.mode === "sync";
 
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+	typeof readMember(value, "then") === "function";
+
+/**
+ * A sync driver commits when the transaction callback returns. With an async
+ * callback, the queries after an `await` would run after the commit. Throwing
+ * rolls the transaction back; the scope's `ended` flag, or the driver's own
+ * check, stops the queries that the callback still sends.
+ */
+function rejectAsyncCallback(state: WrapState, result: unknown): void {
+	if (!isSync(state) || !isThenable(result)) return;
+	// The caller gets the TypeError; the callback's own later error is expected.
+	Promise.resolve(result).catch(() => undefined);
+	throw new TypeError(
+		"drizzle-middleware: a transaction callback on a sync SQLite driver must not be async. The driver commits when the callback returns, so the queries after an `await` would run outside the transaction, without the middleware.",
+	);
+}
+
 /**
  * Runs `body` alone on the connection, when the driver needs that. Work
  * inside a transaction is already alone, and waiting there would deadlock.
@@ -276,6 +297,7 @@ function withScope(
 ): unknown {
 	const { scope } = state;
 	if (scope === undefined) return body([]);
+	if (scope.ended) throw transactionEnded();
 	if (scope.beforeDone === undefined) {
 		const result = body(scope.statements.before);
 		scope.beforeDone =
@@ -295,6 +317,7 @@ function withScope(
 function openNested(state: WrapState, open: () => unknown): unknown {
 	const { scope } = state;
 	if (scope === undefined) return open();
+	if (scope.ended) throw transactionEnded();
 	if (scope.beforeDone === undefined) {
 		const { before } = scope.statements;
 		if (before.length === 0) scope.beforeDone = "sync";
@@ -315,7 +338,7 @@ function runTransaction(
 	config: unknown,
 ): unknown {
 	const statements = collectStatements(state.layers);
-	const scope: Scope = { statements, beforeDone: undefined };
+	const scope: Scope = { statements, beforeDone: undefined, ended: false };
 	const finish = (txSession: DrizzleSession): unknown => {
 		if (isEmpty(statements)) return undefined;
 		const remaining: Statements = {
@@ -329,7 +352,10 @@ function runTransaction(
 			[],
 		);
 	};
-	return exclusive(state, () =>
+	const end = () => {
+		scope.ended = true;
+	};
+	const open = () =>
 		state.session.transaction((rawTx) => {
 			const txDb = asDrizzleDb(rawTx);
 			const scoped = wrapDb(txDb, {
@@ -342,6 +368,7 @@ function runTransaction(
 			});
 			if (isSync(state)) {
 				const result = fn(scoped);
+				rejectAsyncCallback(state, result);
 				finish(txDb.session);
 				return result;
 			}
@@ -351,8 +378,21 @@ function runTransaction(
 				await finish(txDb.session);
 				return result;
 			})();
-		}, config),
-	);
+		}, config);
+	return exclusive(state, () => {
+		let result: unknown;
+		try {
+			result = open();
+		} catch (error) {
+			end();
+			throw error;
+		}
+		if (!isThenable(result)) {
+			end();
+			return result;
+		}
+		return Promise.resolve(result).finally(end);
+	});
 }
 
 // -----------------------------------------------------------------------
@@ -520,13 +560,15 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 						Reflect.apply(nested, rawDb, [
 							(rawNested: unknown) => {
 								const nestedDb = asDrizzleDb(rawNested);
-								return fn(
+								const result = fn(
 									wrapDb(nestedDb, {
 										...state,
 										session: nestedDb.session,
 										rawDb: nestedDb,
 									}),
 								);
+								rejectAsyncCallback(state, result);
+								return result;
 							},
 							...rest,
 						]),

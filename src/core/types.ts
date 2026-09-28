@@ -62,13 +62,33 @@ type TransactionOf<TDb> = TDb extends {
 type BrandedTransaction<TDb> = TDb extends {
 	transaction(fn: never, ...rest: infer Rest): infer Returned;
 }
-	? {
-			transaction<T>(
-				fn: (tx: WithMiddleware<TransactionOf<TDb>>) => T,
-				...rest: Rest
-			): Returned extends PromiseLike<unknown> ? Promise<Awaited<T>> : T;
-		}
+	? Returned extends PromiseLike<unknown>
+		? {
+				transaction<T>(
+					fn: (tx: WithMiddleware<TransactionOf<TDb>>) => T,
+					...rest: Rest
+				): Promise<Awaited<T>>;
+			}
+		: {
+				transaction<T extends NotThenable>(
+					fn: (tx: WithMiddleware<TransactionOf<TDb>>) => T,
+					...rest: Rest
+				): T;
+			}
 	: unknown;
+
+/** Any value except a promise: a sync transaction must not be async. */
+type NotThenable =
+	| { readonly then?: never }
+	| string
+	| number
+	| boolean
+	| bigint
+	| symbol
+	| null
+	| undefined
+	// biome-ignore lint/suspicious/noConfusingVoidType: a callback without a return value returns `void`.
+	| void;
 
 /**
  * A db returned by `withMiddleware`. It is a subtype of `TBaseDB`, so it is
