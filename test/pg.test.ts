@@ -74,11 +74,6 @@ describe("withMiddleware (pg)", () => {
 	// The wrapped db
 	// -------------------------------------------------------------------
 
-	test("returns a new db instance", async () => {
-		const { db } = await createDb();
-		expect(withMiddleware(db, () => ({}))).not.toBe(db);
-	});
-
 	test("blocks $client", async () => {
 		const { client, db } = await createDb();
 		const wrapped = withMiddleware(db, () => ({}));

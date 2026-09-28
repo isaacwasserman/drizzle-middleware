@@ -104,19 +104,6 @@ describe("withMiddleware (sqlite)", () => {
 	// The wrapped db
 	// -------------------------------------------------------------------
 
-	test("returns a new db instance", () => {
-		const db = createDb();
-		expect(withMiddleware(db, () => ({}))).not.toBe(db);
-	});
-
-	test("blocks $client", () => {
-		const db = createDb();
-		expect(() => withMiddleware(db, () => ({})).$client).toThrow(
-			"blocked access to `$client`",
-		);
-		expect(db.$client).toBeDefined();
-	});
-
 	test("keeps the relational-query flags of the input db and transaction", () => {
 		const db = createDb();
 		const dialect = readMember(db, "dialect");
@@ -163,16 +150,6 @@ describe("withMiddleware (sqlite)", () => {
 				.all(),
 		).toEqual([{ id: 1 }]);
 		expect(transaction).not.toHaveBeenCalled();
-	});
-
-	test("$count runs the middleware and returns the count", async () => {
-		const db = createDb();
-		db.insert(t)
-			.values([{ id: 1 }, { id: 2 }])
-			.run();
-		const wrapped = withMiddleware(db, () => ({ before: [insertLog("b")] }));
-		expect(await wrapped.$count(t)).toBe(2);
-		expect(logged(db)).toEqual(["b"]);
 	});
 
 	test("a wrapped open transaction runs before and after around each query, in it", () => {

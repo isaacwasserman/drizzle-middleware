@@ -69,122 +69,50 @@ describe("e2e: pglite middleware", () => {
 		]);
 	});
 
-	test("before queries execute atomically with the main query", async () => {
+	test("before and after run around the query, in order, in one transaction", async () => {
 		const db = await createTestDb();
-
 		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('tenant', 'acme') ON CONFLICT(key) DO UPDATE SET value = 'acme'`,
-			],
+			before: [sql`INSERT INTO kv (key, value) VALUES ('before', ${"acme"})`],
+			after: [sql`INSERT INTO kv (key, value) VALUES ('after', 'done')`],
 		}));
 
-		await wrapped.insert(users).values({ name: "Bob" });
-
-		const kvRows = await db.select().from(kvStore);
-		expect(kvRows).toEqual([{ key: "tenant", value: "acme" }]);
-	});
-
-	test("after queries execute atomically with the main query", async () => {
-		const db = await createTestDb();
-
-		const wrapped = withMiddleware(db, () => ({
-			after: [
-				sql`INSERT INTO kv (key, value) VALUES ('done', 'yes') ON CONFLICT(key) DO UPDATE SET value = 'yes'`,
-			],
-		}));
-
-		await wrapped.insert(users).values({ name: "Charlie" });
-
-		const kvRows = await db.select().from(kvStore);
-		expect(kvRows).toEqual([{ key: "done", value: "yes" }]);
-	});
-
-	test("before + select + after all work together", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values({ name: "Dave" });
-
-		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('pre', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
-			],
-			after: [
-				sql`INSERT INTO kv (key, value) VALUES ('post', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
-			],
-		}));
-
-		const rows = await wrapped.select().from(users);
-		expect(rows).toEqual([{ id: 1, name: "Dave" }]);
-
-		const kvRows = await db.select().from(kvStore).orderBy(kvStore.key);
-		expect(kvRows).toEqual([
-			{ key: "post", value: "1" },
-			{ key: "pre", value: "1" },
+		// The query sees the `before` row, and not yet the `after` row.
+		expect(await wrapped.select({ key: kvStore.key }).from(kvStore)).toEqual([
+			{ key: "before" },
 		]);
+		expect(await db.select().from(kvStore).orderBy(kvStore.key)).toEqual([
+			{ key: "after", value: "done" },
+			{ key: "before", value: "acme" },
+		]);
+
+		// A failing statement rolls back the whole unit: the query's insert and
+		// the `before` row are not kept.
+		const failing = withMiddleware(db, () => ({
+			before: [sql`INSERT INTO kv (key, value) VALUES ('rolled back', 'x')`],
+			after: [sql`INSERT INTO kv (key, value) VALUES ('bad', NULL)`],
+		}));
+		await expect(
+			Promise.resolve(failing.insert(users).values({ name: "Bob" })),
+		).rejects.toThrow();
+		expect(await db.select().from(users)).toEqual([]);
+		expect(await db.select().from(kvStore)).toHaveLength(2);
 	});
 
-	test("middleware params are inlined correctly", async () => {
+	test("insert, update and delete run with middleware and return their results", async () => {
 		const db = await createTestDb();
-		const tenant = "acme-corp";
-
 		const wrapped = withMiddleware(db, () => ({
 			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('tenant', ${tenant}) ON CONFLICT(key) DO UPDATE SET value = ${tenant}`,
+				sql`INSERT INTO kv (key, value) VALUES ('op', 'x') ON CONFLICT(key) DO NOTHING`,
 			],
 		}));
 
-		await wrapped.insert(users).values({ name: "Eve" });
-
-		const kvRows = await db.select().from(kvStore);
-		expect(kvRows).toEqual([{ key: "tenant", value: "acme-corp" }]);
-	});
-
-	test("insert returning works with batch middleware", async () => {
-		const db = await createTestDb();
-
-		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('x', 'y') ON CONFLICT(key) DO UPDATE SET value = 'y'`,
-			],
-		}));
-
-		const result = await wrapped
-			.insert(users)
-			.values({ name: "Frank" })
-			.returning();
-
-		expect(result).toEqual([{ id: 1, name: "Frank" }]);
-	});
-
-	test("update works with batch middleware", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values({ name: "Grace" });
-
-		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('op', 'update') ON CONFLICT(key) DO UPDATE SET value = 'update'`,
-			],
-		}));
-
+		expect(
+			await wrapped.insert(users).values({ name: "Frank" }).returning(),
+		).toEqual([{ id: 1, name: "Frank" }]);
 		await wrapped.update(users).set({ name: "Gwen" }).where(eq(users.id, 1));
-
-		const rows = await db.select().from(users);
-		expect(rows).toEqual([{ id: 1, name: "Gwen" }]);
-	});
-
-	test("delete works with batch middleware", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values({ name: "Heidi" });
-
-		const wrapped = withMiddleware(db, () => ({
-			before: [
-				sql`INSERT INTO kv (key, value) VALUES ('op', 'delete') ON CONFLICT(key) DO UPDATE SET value = 'delete'`,
-			],
-		}));
-
+		expect(await db.select().from(users)).toEqual([{ id: 1, name: "Gwen" }]);
 		await wrapped.delete(users).where(eq(users.id, 1));
-
-		const rows = await db.select().from(users);
-		expect(rows).toHaveLength(0);
+		expect(await db.select().from(users)).toEqual([]);
 	});
 
 	test("multiple queries each trigger middleware independently", async () => {
@@ -231,16 +159,6 @@ describe("e2e: pglite middleware", () => {
 		expect(kvRows).toEqual([{ key: "phase", value: "after" }]);
 	});
 
-	test("fast path: empty middleware does not alter behavior", async () => {
-		const db = await createTestDb();
-		await db.insert(users).values({ name: "Kim" });
-
-		const wrapped = withMiddleware(db, () => ({}));
-
-		const rows = await wrapped.select().from(users);
-		expect(rows).toEqual([{ id: 1, name: "Kim" }]);
-	});
-
 	test("set_config is visible to the main query via batch before", async () => {
 		const db = await createTestDb();
 		await db.insert(users).values({ name: "Leo" });
@@ -257,13 +175,6 @@ describe("e2e: pglite middleware", () => {
 			.from(users);
 
 		expect(rows).toEqual([{ name: "Leo", tenant: "acme" }]);
-	});
-
-	test("wrapped db blocks $client", async () => {
-		const db = await createTestDb();
-		const wrapped = withMiddleware(db, () => ({}));
-		expect(() => wrapped.$client).toThrow("blocked access to `$client`");
-		expect(db.$client).toBeInstanceOf(PGlite);
 	});
 
 	test("join with duplicate column labels maps correctly through the batch", async () => {

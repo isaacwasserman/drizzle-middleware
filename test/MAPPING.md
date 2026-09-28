@@ -20,16 +20,31 @@ of them. All tests in `test/` run against v2.
 | `guard-members.test.ts` | The review of the guard member lists (from the v1 unit tests). |
 | `driver-plan.test.ts`, `internal-drizzle.test.ts`, `types.test-d.ts` | v2 only: the driver plan, the Drizzle boundary, the types. |
 
-## e2e suites (47 tests): copied
+## e2e suites (47 tests)
 
-All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
-`e2e-batched.test.ts` (8) are copied with the same names.
+The tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
+`e2e-batched.test.ts` (8) are copied with the same names, except these, which
+were merged or removed because another test checks the same behavior:
+
+| v1 test | Now in |
+|---|---|
+| before queries execute atomically with the main query | `e2e-pg` / `e2e-sqlite`: before and after run around the query, in order, in one transaction. The new test also checks the order and that a failure rolls back the whole unit, which the old tests did not. |
+| after queries execute atomically with the main query | As above. |
+| before + select + after all work together | As above. |
+| middleware params are inlined correctly | As above (the `before` statement has a parameter). v2 does not inline values. |
+| insert returning works / insert returns correct result | `e2e-pg` / `e2e-sqlite`: insert, update and delete run with middleware and return their results |
+| update works with batch middleware | As above. |
+| delete works with batch middleware | As above. |
+| fast path: empty middleware does not alter behavior (pg) | `pg`: no middleware: the query runs directly, without a transaction |
+| wrapped db blocks $client (pg) | `pg`: blocks $client |
+
+The SQLite e2e suite runs for both bun:sqlite and better-sqlite3.
 
 ## pg.test.ts (55 tests)
 
 | v1 test | Now in |
 |---|---|
-| returns a new db instance | `pg`: same name |
+| returns a new db instance | Removed: every test uses the new db; `blocks $client` checks that the input db is unchanged. |
 | blocks $client and preserves $cache | `pg`: blocks $client. The `$cache` check is dropped: v2 rejects a db with a cache. |
 | keeps parseRqbJson of the input db and transaction | `pg`: same name |
 | Prisma PG: runs each statement in order in a Prisma transaction | `pg`: same name |
@@ -89,15 +104,15 @@ All tests in `e2e-pg.test.ts` (21), `e2e-sqlite.test.ts` (18) and
 
 | v1 test | Now in |
 |---|---|
-| returns a new db instance | `sqlite`: same name |
-| blocks $client and preserves $cache | `sqlite`: blocks $client (the `$cache` check is dropped, as for pg) |
+| returns a new db instance | Removed, as for pg. |
+| blocks $client and preserves $cache | `e2e-sqlite`: wrapped db blocks $client (for both drivers; the `$cache` check is dropped, as for pg) |
 | fast path: no before/after skips transaction | `sqlite`: no middleware: the query runs directly, without a transaction |
 | before + inner concatenated into one statement | Not applicable (v1 internal). |
 | params use ? syntax (SQLite), not $N (PG) | Not applicable (v1 inlining). Intent: `sqlite`: libSQL: values reach the driver as arguments . |
 | inner query params are inlined via dialect capture | `sqlite`: libSQL: each execution of a prepared query uses its own values |
 | standalone: 3 before + inner + 3 after = 1 prepareQuery call | Not applicable (v1 internal count). |
 | user tx: before/after run individually | `e2e-sqlite`: user transaction: before/after run at boundaries |
-| customResultMapper is applied to the extracted result | `sqlite`: $count runs the middleware and returns the count |
+| customResultMapper is applied to the extracted result | `e2e-sqlite`: every supported query API still runs the middleware (runs `$count`) |
 | driver transactions (subclasses) are detected as tx input | `sqlite`: libSQL: a wrapped transaction runs every statement on it, in order |
 | libSQL: nested transaction on a wrapped transaction runs the middleware | `sqlite`: same intent |
 | Prisma SQLite: runs each statement in order in a Prisma transaction | `sqlite`: same name |

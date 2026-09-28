@@ -57,123 +57,50 @@ for (const driver of SYNC_DRIVERS) {
 			expect(rows).toEqual([{ id: 1, name: "Alice" }]);
 		});
 
-		test("before queries execute inside the transaction", () => {
+		test("before and after run around the query, in order, in one transaction", () => {
 			const db = createTestDb();
-
 			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('tenant', 'acme') ON CONFLICT(key) DO UPDATE SET value = 'acme'`,
-				],
+				before: [sql`INSERT INTO kv (key, value) VALUES ('before', ${"acme"})`],
+				after: [sql`INSERT INTO kv (key, value) VALUES ('after', 'done')`],
 			}));
 
-			wrapped.insert(users).values({ name: "Bob" }).run();
-
-			const kvRows = db.select().from(kvStore).all();
-			expect(kvRows).toEqual([{ key: "tenant", value: "acme" }]);
-		});
-
-		test("after queries execute inside the transaction", () => {
-			const db = createTestDb();
-
-			const wrapped = withMiddleware(db, () => ({
-				after: [
-					sql`INSERT INTO kv (key, value) VALUES ('done', 'yes') ON CONFLICT(key) DO UPDATE SET value = 'yes'`,
-				],
-			}));
-
-			wrapped.insert(users).values({ name: "Charlie" }).run();
-
-			const kvRows = db.select().from(kvStore).all();
-			expect(kvRows).toEqual([{ key: "done", value: "yes" }]);
-		});
-
-		test("before + select + after all work together", () => {
-			const db = createTestDb();
-			db.insert(users).values({ name: "Dave" }).run();
-
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('pre', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
-				],
-				after: [
-					sql`INSERT INTO kv (key, value) VALUES ('post', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`,
-				],
-			}));
-
-			const rows = wrapped.select().from(users).all();
-			expect(rows).toEqual([{ id: 1, name: "Dave" }]);
-
-			const kvRows = db.select().from(kvStore).orderBy(kvStore.key).all();
-			expect(kvRows).toEqual([
-				{ key: "post", value: "1" },
-				{ key: "pre", value: "1" },
+			// The query sees the `before` row, and not yet the `after` row.
+			expect(wrapped.select({ key: kvStore.key }).from(kvStore).all()).toEqual([
+				{ key: "before" },
 			]);
+			expect(db.select().from(kvStore).orderBy(kvStore.key).all()).toEqual([
+				{ key: "after", value: "done" },
+				{ key: "before", value: "acme" },
+			]);
+
+			// A failing statement rolls back the whole unit: the query's insert
+			// and the `before` row are not kept.
+			const failing = withMiddleware(db, () => ({
+				before: [sql`INSERT INTO kv (key, value) VALUES ('rolled back', 'x')`],
+				after: [sql`INSERT INTO kv (key, value) VALUES ('bad', NULL)`],
+			}));
+			expect(() =>
+				failing.insert(users).values({ name: "Bob" }).run(),
+			).toThrow();
+			expect(db.select().from(users).all()).toEqual([]);
+			expect(db.select().from(kvStore).all()).toHaveLength(2);
 		});
 
-		test("middleware params are inlined correctly", () => {
+		test("insert, update and delete run with middleware and return their results", () => {
 			const db = createTestDb();
-			const tenant = "acme-corp";
-
 			const wrapped = withMiddleware(db, () => ({
 				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('tenant', ${tenant}) ON CONFLICT(key) DO UPDATE SET value = ${tenant}`,
+					sql`INSERT INTO kv (key, value) VALUES ('op', 'x') ON CONFLICT(key) DO NOTHING`,
 				],
 			}));
 
-			wrapped.insert(users).values({ name: "Eve" }).run();
-
-			const kvRows = db.select().from(kvStore).all();
-			expect(kvRows).toEqual([{ key: "tenant", value: "acme-corp" }]);
-		});
-
-		test("insert returns correct result", () => {
-			const db = createTestDb();
-
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('x', 'y') ON CONFLICT(key) DO UPDATE SET value = 'y'`,
-				],
-			}));
-
-			const result = wrapped
-				.insert(users)
-				.values({ name: "Frank" })
-				.returning()
-				.all();
-
-			expect(result).toEqual([{ id: 1, name: "Frank" }]);
-		});
-
-		test("update works with batch middleware", () => {
-			const db = createTestDb();
-			db.insert(users).values({ name: "Grace" }).run();
-
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('op', 'update') ON CONFLICT(key) DO UPDATE SET value = 'update'`,
-				],
-			}));
-
+			expect(
+				wrapped.insert(users).values({ name: "Frank" }).returning().all(),
+			).toEqual([{ id: 1, name: "Frank" }]);
 			wrapped.update(users).set({ name: "Gwen" }).where(eq(users.id, 1)).run();
-
-			const rows = db.select().from(users).all();
-			expect(rows).toEqual([{ id: 1, name: "Gwen" }]);
-		});
-
-		test("delete works with batch middleware", () => {
-			const db = createTestDb();
-			db.insert(users).values({ name: "Heidi" }).run();
-
-			const wrapped = withMiddleware(db, () => ({
-				before: [
-					sql`INSERT INTO kv (key, value) VALUES ('op', 'delete') ON CONFLICT(key) DO UPDATE SET value = 'delete'`,
-				],
-			}));
-
+			expect(db.select().from(users).all()).toEqual([{ id: 1, name: "Gwen" }]);
 			wrapped.delete(users).where(eq(users.id, 1)).run();
-
-			const rows = db.select().from(users).all();
-			expect(rows).toHaveLength(0);
+			expect(db.select().from(users).all()).toEqual([]);
 		});
 
 		test("multiple queries each trigger middleware independently", () => {

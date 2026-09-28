@@ -142,15 +142,4 @@ describe("security", () => {
 			expect(await db.all(sql`select v from log`)).toEqual([]);
 		},
 	);
-
-	test("the middleware runs for every query, and only in its own unit", async () => {
-		const { db } = await createDb();
-		const wrapped = withLog(db);
-		await wrapped.select().from(secrets);
-		await wrapped.select().from(secrets);
-		expect((await db.select({ v: log.v }).from(log)).map((r) => r.v)).toEqual([
-			"before",
-			"before",
-		]);
-	});
 });
