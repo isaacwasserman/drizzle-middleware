@@ -107,6 +107,24 @@ describe("executeBatchTransaction: pglite", () => {
 		expect(await base.select().from(kv)).toEqual([{ key: "mw", value: "2" }]);
 	});
 
+	test("rejects a value that is not a query builder", async () => {
+		const db = await createPgDb();
+		const wrapped = withMiddleware(db, () => ({}));
+		// The types reject an awaited result; the runtime check is for callers
+		// without types.
+		const notBuilders: unknown[] = [
+			await db.select().from(users),
+			wrapped.execute(sql`select 1`),
+		];
+		for (const notBuilder of notBuilders)
+			expect(() =>
+				executeBatchTransaction([
+					db.select().from(users),
+					notBuilder as PromiseLike<unknown>,
+				]),
+			).toThrow(TypeError);
+	});
+
 	test("rejects queries from different database instances", async () => {
 		const dbA = await createPgDb();
 		const dbB = await createPgDb();

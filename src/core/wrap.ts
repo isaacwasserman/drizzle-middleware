@@ -16,6 +16,7 @@ import {
 	entityKindOf,
 	extendsEntityKind,
 	hasQueryCache,
+	isQueryBuilder,
 	prepareBuilderOn,
 	readConstruction,
 	readMember,
@@ -410,6 +411,12 @@ export function executeBatchTransactionWith(
 	queries: readonly unknown[],
 ): Promise<unknown[]> {
 	if (queries.length === 0) return Promise.resolve([]);
+	queries.forEach((q, i) => {
+		if (!isQueryBuilder(q))
+			throw new TypeError(
+				`drizzle-middleware: executeBatchTransaction accepts only Drizzle query builders, such as db.select() or db.insert(); the query at index ${i} is not one. Pass the builders, not awaited results. db.execute() is not supported.`,
+			);
+	});
 	const builders = queries.map(asQueryBuilder);
 	const session = builders[0]?.session;
 	if (session === undefined) return Promise.resolve([]);

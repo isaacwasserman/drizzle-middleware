@@ -201,6 +201,17 @@ export interface DrizzleQueryBuilder {
 	readonly session: DrizzleSession;
 }
 
+/**
+ * True for a value that looks like a Drizzle query builder: it can prepare
+ * itself, and it has a session. Awaited results and `db.execute()` do not.
+ */
+export function isQueryBuilder(value: unknown): boolean {
+	return (
+		hasMethods(value, ["_prepare", "then"]) &&
+		isObject(readMember(value, "session"))
+	);
+}
+
 export function asQueryBuilder(value: unknown): DrizzleQueryBuilder {
 	if (!hasMethods(value, ["_prepare", "then"]))
 		throw new DrizzleInternalsError(
