@@ -70,7 +70,7 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 | neon-serverless (WebSocket) | Pipeline | Yes (spike, through Neon wsproxy) |
 | Vercel Postgres | Pipeline (uses the neon-serverless client) | No |
 | Netlify DB, WebSocket session | Pipeline, if its client is node-postgres compatible | No |
-| postgres-js, `prepare: true` | Pipelined transaction (`unsafe(sql, params, { prepare: true })`) | Yes (tests, real Postgres) |
+| postgres-js, `prepare: true` | Pipelined transaction (`unsafe(sql, params, { prepare: true })`), with a guard transaction after the COMMIT | Yes (tests, real Postgres) |
 | postgres-js, `prepare: false` | Pipelined transaction, inline | Yes (tests, real Postgres) |
 | Bun SQL 1.4+, `prepare: true` | Pipelined transaction (tagged-template calls; pipelined `unsafe()` calls take extra round trips) | Yes (tests, real Postgres) |
 | Bun SQL, `prepare: false`, or Bun before 1.4 | Sequential. With `prepare: false` Bun does not pipeline. Bun 1.3 gave pipelined queries wrong results and hung on a failing pipelined batch. | Yes (tests, real Postgres) |
@@ -98,6 +98,8 @@ Rule for each driver: use a one-round-trip strategy if the driver has one. If no
 | Prisma SQLite | Sequential (`$transaction`) | Fake client only |
 
 Note: Drizzle uses the session kind `SQLJsSession` for both sql.js and node:sqlite. Both use the same strategy. A test fails if Drizzle adds another shared kind.
+
+Note: postgres-js retries a cached prepared statement that the server rejects as out of date (for example after `ALTER TABLE`). It writes the retry after everything already on the connection. In a pipelined unit that is after the COMMIT, so the retry would run on its own, outside the transaction and without the middleware. So with `prepare: true` the unit's flight ends with a second `BEGIN` (the guard): a retry lands in the guard transaction, and a `ROLLBACK`, written after the results arrive, discards it. The connection is released as soon as the `ROLLBACK` is written. The unit also checks COMMIT's command tag: when a statement failed, Postgres reports `ROLLBACK`, so the unit fails even when the driver hid the error. postgres-js writes at most `max_pipeline` queries at once, so a longer unit sends its COMMIT after the statements have settled. The inline path (`prepare: false`) has no cached statements, so it needs no guard.
 
 Note: node-postgres with a `pg.Client` (or a checked-out `PoolClient`) is one connection, and Drizzle opens its transactions on it. Work sent during an open transaction runs inside it, so another request's `before` would change the transaction's state. The package queues the client's work in the same way as for Bun SQL SQLite (below). Drizzle's own pool check covers more clients than the package's, so the queue is on whenever Drizzle shares the connection.
 

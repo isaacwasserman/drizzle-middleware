@@ -49,7 +49,7 @@ interface SqlClient {
 	unsafe(
 		sql: string,
 		params?: readonly unknown[],
-		options?: { prepare: boolean },
+		options?: { prepare?: boolean; onexecute?: () => boolean },
 	): Query;
 }
 
@@ -182,29 +182,99 @@ async function sendUnit(
 			"drizzle-middleware: the driver client has no reserve(), so the batch cannot run in one transaction on one connection.",
 		);
 	const reserved: unknown = await Reflect.apply(reserve, client, []);
+
+	// postgres-js retries a cached prepared statement that the server rejects
+	// as out of date (for example after ALTER TABLE). It writes the retry after
+	// everything already on the connection, which here is after the COMMIT, so
+	// the retry would run outside the transaction. So in "prepared" mode a
+	// guard BEGIN follows the COMMIT in the same flight: a retry lands in the
+	// guard transaction, and the ROLLBACK after the results discards it.
+	// postgres-js writes at most `max_pipeline` queries at once; a longer unit
+	// sends its COMMIT after the statements have settled, so a retry stays
+	// inside the unit's transaction.
+	const unit: SqlCall[] = [BEGIN, ...statements, COMMIT];
+	const guarded = mode === "prepared";
+	const oneFlight = !guarded || unit.length + 1 <= maxPipeline(client);
+	const sent = (
+		guarded && oneFlight
+			? [...unit, BEGIN]
+			: oneFlight
+				? unit
+				: unit.slice(0, -1)
+	).map((s) => query(reserved, s, mode));
+	const guardOpen = guarded && oneFlight;
 	try {
-		// After a failure, Postgres turns the COMMIT into a ROLLBACK.
-		const settled = await sendInOrder(
-			reserved,
-			[
-				{ sql: "begin", params: [], mode: "rows" },
-				...statements,
-				{ sql: "commit", params: [], mode: "rows" },
-			],
-			mode,
-		);
+		const settled = await Promise.allSettled(sent);
+		if (!oneFlight)
+			settled.push(
+				...(await Promise.allSettled([query(reserved, COMMIT, mode)])),
+			);
 		const begin = settled[0];
-		const commit = settled[settled.length - 1];
-		const inner = settled.slice(1, -1);
+		const commit = settled[unit.length - 1];
+		const inner = settled.slice(1, unit.length - 1);
 		if (begin?.status === "rejected") throw begin.reason;
 		const failure = firstFailure(inner);
 		if (failure) throw failure;
 		if (commit?.status === "rejected") throw commit.reason;
+		// After a failure, Postgres turns the COMMIT into a ROLLBACK. A
+		// statement whose error the driver hid (a postgres-js retry) shows only
+		// here.
+		if (readMember(commit?.value, "command") !== "COMMIT")
+			throw silentRollback(sent.slice(1, unit.length - 1));
 		return valuesOf(inner);
 	} finally {
-		const release = readMember(reserved, "release");
-		if (typeof release === "function") Reflect.apply(release, reserved, []);
+		let released = false;
+		const release = () => {
+			if (released) return;
+			released = true;
+			const fn = readMember(reserved, "release");
+			if (typeof fn === "function") Reflect.apply(fn, reserved, []);
+		};
+		if (guardOpen) closeGuard(reserved, release);
+		else release();
 	}
+}
+
+/**
+ * Writes the ROLLBACK that closes the guard, then releases the connection.
+ * postgres-js keeps the writes on a connection in order, so the next user's
+ * queries go after the ROLLBACK; the connection need not wait for its reply.
+ * The `onexecute` option runs when the query is written. If it does not run,
+ * the connection is released after the reply.
+ */
+function closeGuard(reserved: unknown, release: () => void): void {
+	const rollback = asSqlClient(reserved).unsafe("rollback", [], {
+		onexecute: () => {
+			queueMicrotask(release);
+			return true;
+		},
+	});
+	rollback.then(release, release);
+}
+
+const BEGIN: SqlCall = { sql: "begin", params: [], mode: "rows" };
+const COMMIT: SqlCall = { sql: "commit", params: [], mode: "rows" };
+
+/** postgres-js's `max_pipeline` option (default 100). */
+function maxPipeline(client: unknown): number {
+	const value = readMember(readMember(client, "options"), "max_pipeline");
+	return typeof value === "number" ? value : 100;
+}
+
+/**
+ * The unit's transaction rolled back, but no statement reported an error.
+ * postgres-js keeps the first error of a retried query on the query object;
+ * it is used only to name the statement in the error.
+ */
+function silentRollback(statements: readonly PromiseLike<unknown>[]): Error {
+	const index = statements.findIndex((q) => readMember(q, "retried") != null);
+	const cause =
+		index === -1 ? undefined : readMember(statements[index], "retried");
+	return index === -1
+		? new Error(
+				"drizzle-middleware: the database rolled back the unit's transaction, but no statement reported an error.",
+			)
+		: new BatchError(index, cause);
 }
 
 /** What differs between postgres-js and Bun SQL. */

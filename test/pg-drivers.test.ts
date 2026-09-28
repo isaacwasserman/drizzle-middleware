@@ -208,6 +208,48 @@ for (const driver of drivers) {
 			expect(Array.from(table.rows ?? table)[0]).toMatchObject({ ok: true });
 		});
 
+		// postgres-js retries a cached statement that the server rejects as out of
+		// date. It writes the retry after everything already on the connection,
+		// which can be after the unit's COMMIT.
+		test("a statement that the driver retries cannot run outside its unit", async () => {
+			await reset();
+			const name = `retried_${Date.now()}`;
+			await db.execute(
+				sql.raw(
+					`create table "${schemaName}".${name} (id serial primary key, v text, tenant text default current_setting('app.tenant', true))`,
+				),
+			);
+			const retried = pgSchema(schemaName).table(name, {
+				id: serial("id").primaryKey(),
+				v: text("v"),
+				tenant: text("tenant"),
+			});
+			const wrapped = withMiddleware(db, () => ({
+				before: [sql`select set_config('app.tenant', 'acme', true)`],
+			}));
+			const insert = (v: string) =>
+				wrapped.insert(retried).values({ v }).returning({ v: retried.v });
+			// The statement is now prepared and cached on the connection.
+			await insert("cached");
+			// Its result type changes, so the cached plan is out of date.
+			await db.execute(
+				sql.raw(
+					`alter table "${schemaName}".${name} alter column v type varchar(100)`,
+				),
+			);
+			// The unit may fail, as it does with plain Drizzle on some drivers.
+			await Promise.resolve(insert("after the change")).catch(() => {});
+			// The connection is still usable.
+			expect(await wrapped.select().from(t.users)).toEqual([]);
+			// No row was written without the unit's middleware.
+			expect(
+				await db
+					.select({ v: retried.v, tenant: retried.tenant })
+					.from(retried)
+					.where(sql`${retried.tenant} is distinct from 'acme'`),
+			).toEqual([]);
+		});
+
 		test("bytea values keep every byte", async () => {
 			await reset();
 			const data = Buffer.from([0, 1, 39, 92, 255]);
