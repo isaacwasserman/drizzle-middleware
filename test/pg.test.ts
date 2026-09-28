@@ -1,7 +1,7 @@
 // withMiddleware (pg) on PGlite: the wrapped db, query results, a wrapped
 // open transaction, and the guard.
 
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { defineRelations, entityKind, eq, sql } from "drizzle-orm-beta";
 import {
@@ -29,8 +29,14 @@ const posts = pgTable("posts", {
 const log = pgTable("log", { n: serial("n").primaryKey(), v: text("v") });
 const relations = defineRelations({ users, posts });
 
+// One PGlite database for the file, because each one takes about half a
+// second to start. Each test gets an empty schema and the default settings.
+const client = new PGlite();
+const freshSchema = () =>
+	client.exec("reset all; drop schema public cascade; create schema public");
+
 async function createDb() {
-	const client = new PGlite();
+	await freshSchema();
 	const db = drizzle({ client, relations, schema: { users, posts } });
 	await db.execute(
 		sql`create table users (id serial primary key, name text not null)`,
@@ -51,6 +57,9 @@ async function logged(db: Awaited<ReturnType<typeof createDb>>["db"]) {
 const insertLog = (v: string) => sql`insert into log (v) values (${v})`;
 
 describe("withMiddleware (pg)", () => {
+	// The spies are on the shared client.
+	afterEach(() => mock.restore());
+
 	// -------------------------------------------------------------------
 	// The wrapped db
 	// -------------------------------------------------------------------

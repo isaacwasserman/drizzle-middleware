@@ -27,8 +27,15 @@ const kv = pgTable("kv", {
 	value: text("value").notNull(),
 });
 
+// One PGlite database for the file, because each one takes about half a
+// second to start. Each test gets an empty schema and the default settings.
+const client = new PGlite();
+const freshSchema = () =>
+	client.exec("reset all; drop schema public cascade; create schema public");
+
 async function createPgDb() {
-	const db = pgDrizzle({ client: new PGlite() });
+	await freshSchema();
+	const db = pgDrizzle({ client });
 	await db.execute(
 		sql`CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`,
 	);

@@ -20,8 +20,14 @@ const files = pgTable("files", {
 });
 const log = pgTable("log", { n: serial("n").primaryKey(), v: text("v") });
 
+// One PGlite database for the file, because each one takes about half a
+// second to start. Each test gets an empty schema and the default settings.
+const client = new PGlite();
+const freshSchema = () =>
+	client.exec("reset all; drop schema public cascade; create schema public");
+
 async function createDb() {
-	const client = new PGlite();
+	await freshSchema();
 	const db = drizzle({ client });
 	await db.execute(sql`create table secrets (id serial primary key, v text)`);
 	await db.execute(sql`create table files (id serial primary key, data bytea)`);
@@ -73,7 +79,7 @@ describe("security", () => {
 	});
 
 	test("a db with a Drizzle query cache is rejected", () => {
-		const db = drizzle({ client: new PGlite(), cache: new MemoryCache() });
+		const db = drizzle({ client, cache: new MemoryCache() });
 		expect(() => withLog(db)).toThrow("cache");
 	});
 

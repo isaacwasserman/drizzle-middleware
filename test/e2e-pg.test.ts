@@ -21,8 +21,14 @@ const orders = pgTable("orders", {
 	userId: integer("user_id").notNull(),
 });
 
+// One PGlite database for the file, because each one takes about half a
+// second to start. Each test gets an empty schema and the default settings.
+const client = new PGlite();
+const freshSchema = () =>
+	client.exec("reset all; drop schema public cascade; create schema public");
+
 async function createTestDb() {
-	const client = new PGlite();
+	await freshSchema();
 	const db = drizzle({ client });
 	await db.execute(
 		sql`CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`,
@@ -203,7 +209,7 @@ describe("e2e: pglite fail-closed guard", () => {
 	}));
 
 	async function createRelationalDb() {
-		const client = new PGlite();
+		await freshSchema();
 		const db = drizzle({ client, relations, schema: { users, posts } });
 		await db.execute(
 			sql`CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`,

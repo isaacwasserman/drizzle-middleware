@@ -28,12 +28,13 @@ class MemoryCache extends Cache {
 	override async onMutate(): Promise<void> {}
 }
 
+// One PGlite database for the file: each one takes about half a second to
+// start, and these tests create no tables.
+const client = new PGlite();
+
 describe("Drizzle internals boundary", () => {
 	test("accepts real Postgres and SQLite dbs and sessions", () => {
-		for (const db of [
-			pglite({ client: new PGlite() }),
-			bunSqlite(":memory:"),
-		]) {
+		for (const db of [pglite({ client }), bunSqlite(":memory:")]) {
 			const checked = asDrizzleDb(db);
 			expect(readMember(db, "session")).toBe(checked.session);
 			expect(asDrizzleSession(readMember(db, "session"))).toBe(checked.session);
@@ -54,7 +55,7 @@ describe("Drizzle internals boundary", () => {
 	});
 
 	test("reads a prepared query from a real session", () => {
-		const db = asDrizzleDb(pglite({ client: new PGlite() }));
+		const db = asDrizzleDb(pglite({ client }));
 		const prepared = db.session.prepareQuery(
 			db.dialect.sqlToQuery(sql`select 1`),
 		);
@@ -62,7 +63,7 @@ describe("Drizzle internals boundary", () => {
 	});
 
 	test("reads entity kinds", () => {
-		const db = asDrizzleDb(pglite({ client: new PGlite() }));
+		const db = asDrizzleDb(pglite({ client }));
 		expect(entityKindOf(db.session)).toBe("PgliteSession");
 		expect(sessionKindOf(db.session)).toBe("PgliteSession");
 		expect(entityKindOf({})).toBeUndefined();
@@ -70,7 +71,7 @@ describe("Drizzle internals boundary", () => {
 	});
 
 	test("detects driver transactions through the prototype chain", async () => {
-		const pg = pglite({ client: new PGlite() });
+		const pg = pglite({ client });
 		await pg.transaction(async (tx) => {
 			expect(entityKindOf(tx)).toBe("PgliteTransaction");
 			expect(extendsEntityKind(tx, "PgAsyncTransaction")).toBe(true);
@@ -88,10 +89,8 @@ describe("Drizzle internals boundary", () => {
 
 	test("detects a Drizzle query cache", () => {
 		const sessionOf = (db: unknown) => asDrizzleDb(db).session;
-		expect(hasQueryCache(sessionOf(pglite({ client: new PGlite() })))).toBe(
-			false,
-		);
-		const cached = pglite({ client: new PGlite(), cache: new MemoryCache() });
+		expect(hasQueryCache(sessionOf(pglite({ client })))).toBe(false);
+		const cached = pglite({ client, cache: new MemoryCache() });
 		expect(hasQueryCache(sessionOf(cached))).toBe(true);
 		expect(hasQueryCache(sessionOf(bunSqlite(":memory:")))).toBe(false);
 	});
