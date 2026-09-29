@@ -125,6 +125,7 @@ A driver counts as supported only when its tests run against the real driver (se
   - The literal copies postgres-js's parameter typing: booleans, bigints and bytes are cast (`::boolean`, `::int8`, `::bytea`), everything else is untyped.
   - `\` becomes `\\` and `'` becomes `''`. The literal does not depend on `standard_conforming_strings`.
   - Accepted values: string, number, bigint, boolean, null, `Uint8Array` (hex `bytea` form). Drizzle's own column encoders produce only these.
+  - The connection's `client_encoding` must be UTF8: in a multibyte encoding such as SJIS, a byte of a character can equal a backslash, so the escaping would not be exact. The package checks the encoding that postgres-js last received from the server, and the one that the `connection` option asks for; anything else throws.
   - Anything else throws: objects, arrays, `Date` (Drizzle's postgres-js client passes dates through unchanged, so their text form is not defined), strings with NUL, symbols, functions.
   - The encoder never passes a string as the replacement argument of `String.replace` (`$$` would become `$`).
   - Known difference: an untyped `NULL` literal succeeds where an untyped `NULL` parameter fails (error 42P18). This is more permissive and does not change data.

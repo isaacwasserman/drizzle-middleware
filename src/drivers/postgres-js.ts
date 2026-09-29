@@ -29,6 +29,7 @@ import {
 } from "../internal/drizzle.js";
 import {
 	type Inference,
+	InlineError,
 	inlineParams,
 	postgresJsInference,
 	splitAtPlaceholders,
@@ -160,8 +161,11 @@ async function sendUnit(
 	mode: SendMode,
 	inference: Inference,
 	pinned: boolean,
+	/** The client the db was wrapped with (a transaction client has no options). */
+	dbClient: unknown,
 ): Promise<unknown[]> {
 	const client = readMember(session, "client");
+	if (mode === "inline") assertUtf8(dbClient);
 	// Everything that can reject the SQL runs before a connection is reserved
 	// and before any query is created: Bun starts a tagged query as soon as it
 	// is created.
@@ -290,6 +294,32 @@ function closeGuard(reserved: unknown, release: () => void): void {
 	rollback.then(release, (error: unknown) => {
 		if (!isConnectionLost(error)) release();
 	});
+}
+
+/**
+ * The inline encoder's escaping is exact only in UTF-8: in a multibyte
+ * encoding such as SJIS, a byte of a character can equal a backslash.
+ * postgres-js asks for UTF8 at connect, unless the `connection` option
+ * overrides it; `parameters` holds what the server last reported (a `SET
+ * client_encoding` changes it). Anything else than UTF8 throws.
+ */
+function assertUtf8(client: unknown): void {
+	const reported = readMember(
+		readMember(client, "parameters"),
+		"client_encoding",
+	);
+	const requested = readMember(
+		readMember(readMember(client, "options"), "connection"),
+		"client_encoding",
+	);
+	for (const value of [reported, requested])
+		if (
+			value !== undefined &&
+			String(value).toUpperCase().replace(/[-_]/g, "") !== "UTF8"
+		)
+			throw new InlineError(
+				`the connection's client_encoding is ${String(value)}, and values are inlined only in UTF8`,
+			);
 }
 
 async function reserveOn(client: unknown): Promise<unknown> {
@@ -430,7 +460,7 @@ function entry(rules: DriverRules): DriverEntry {
 							client: recordingClient((call) => recorder.record(call)),
 						}),
 					send: (s, calls, context) =>
-						sendUnit(s, calls, context, mode, rules.inference, pinned),
+						sendUnit(s, calls, context, mode, rules.inference, pinned, client),
 				},
 				pinned ? serializeOnClient : undefined,
 			);

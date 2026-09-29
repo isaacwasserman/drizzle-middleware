@@ -437,6 +437,55 @@ for (const driver of drivers) {
 			).toBeArray();
 		});
 
+		// The inline encoder's escaping is exact only in UTF-8.
+		(driver.name === "postgres-js (prepare: false)" ? test : test.skip)(
+			"values are inlined only when the connection's encoding is UTF8",
+			async () => {
+				const middleware = () => ({
+					before: [sql`select set_config('app.tenant', ${"acme"}, true)`],
+				});
+				// The error is reported on the query; the package's is its cause.
+				const rejectsForEncoding = async (run: () => PromiseLike<unknown>) => {
+					const error: unknown = await Promise.resolve()
+						.then(run)
+						.then(
+							() => undefined,
+							(e: unknown) => e,
+						);
+					const chain: string[] = [];
+					for (let e = error; e instanceof Error; e = e.cause)
+						chain.push(e.message);
+					expect(chain.join(" | ")).toContain("client_encoding");
+				};
+				const sjis = postgres(url as string, {
+					max: 1,
+					prepare: false,
+					onnotice: () => {},
+					connection: { client_encoding: "SJIS" },
+				});
+				try {
+					await rejectsForEncoding(() =>
+						withMiddleware(postgresJs({ client: sjis }), middleware).execute(
+							sql`select 1`,
+						),
+					);
+				} finally {
+					await sjis.end();
+				}
+				const wrapped = withMiddleware(db, middleware);
+				await db.execute(sql`set client_encoding = 'SJIS'`);
+				try {
+					await rejectsForEncoding(() => wrapped.execute(sql`select 1`));
+					await rejectsForEncoding(() =>
+						wrapped.transaction(async (tx: any) => tx.execute(sql`select 1`)),
+					);
+				} finally {
+					await db.execute(sql`set client_encoding = 'UTF8'`);
+				}
+				expect(await wrapped.execute(sql`select 1 as x`)).toEqual([{ x: 1 }]);
+			},
+		);
+
 		test("bytea values keep every byte", async () => {
 			await reset();
 			const data = Buffer.from([0, 1, 39, 92, 255]);
