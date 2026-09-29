@@ -376,6 +376,37 @@ for (const driver of drivers) {
 			expect((await logged()).length).toBe(6 + rawApis.length);
 		});
 
+		// The package sends the COMMIT, so it decides which statement an error
+		// at the COMMIT belongs to: the query, as without middleware.
+		test.skipIf(driver.dialect !== "pg")(
+			"an error at the COMMIT is reported on the query",
+			async () => {
+				await reset();
+				const name = `deferred_${Date.now()}`;
+				await raw(
+					sql.raw(
+						`create table "${schemaName}".${name} (v text unique deferrable initially deferred)`,
+					),
+				);
+				const wrapped = withMiddleware(db, () => ({
+					before: [sql`select set_config('app.tenant', ${"acme"}, true)`],
+				}));
+				const insert = sql`insert into ${sql.raw(`"${schemaName}".${name}`)} (v) values ('x'), ('x')`;
+				const error: any = await Promise.resolve(wrapped.execute(insert)).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+				const plain: any = await Promise.resolve(db.execute(insert)).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+				expect(plain?.message).toContain(name);
+				expect(error?.constructor).toBe(plain?.constructor);
+				expect(error?.message).toContain(name);
+				expect(error?.message).not.toContain("set_config");
+			},
+		);
+
 		test("the result is the query's, not a middleware statement's", async () => {
 			await reset();
 			await db.insert(t.users).values({ name: "Ada" });

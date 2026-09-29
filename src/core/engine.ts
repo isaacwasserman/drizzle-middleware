@@ -50,6 +50,12 @@ export async function runRecordedBatch<TCall, TResult>(
 	session: DrizzleSession,
 	executions: readonly Execution[],
 	context: SendContext,
+	/**
+	 * The execution that an error of no statement (for example at the COMMIT,
+	 * or a lost connection) is reported on: the unit's first query, as
+	 * Drizzle reports it without middleware.
+	 */
+	reportAt: number,
 ): Promise<unknown[]> {
 	const pending: Pending<TCall, TResult>[] = [];
 	const outputs: Promise<unknown>[] = [];
@@ -115,19 +121,19 @@ export async function runRecordedBatch<TCall, TResult>(
 			context,
 		);
 	} catch (error) {
-		const failed = error instanceof BatchError ? error.index : -1;
+		const failed =
+			error instanceof BatchError &&
+			error.index >= 0 &&
+			error.index < pending.length
+				? error.index
+				: reportAt;
 		const cause = error instanceof BatchError ? error.cause : error;
 		pending.forEach((p, i) =>
-			p.reject(
-				failed === -1 || i === failed ? cause : new RolledBackError(failed),
-			),
+			p.reject(i === failed ? cause : new RolledBackError(failed)),
 		);
 		// Report the failing statement's error, as Drizzle wrapped it.
 		const settled = await Promise.allSettled(outputs);
-		const report =
-			failed >= 0
-				? settled[failed]
-				: settled.find((s) => s.status === "rejected");
+		const report = settled[failed];
 		throw report?.status === "rejected" ? report.reason : cause;
 	}
 

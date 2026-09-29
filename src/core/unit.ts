@@ -1,7 +1,7 @@
 // A unit: `before`, one or more queries, `after`, run with the driver's
 // strategy. See docs/design.md, sections 3 and 4.
 
-import { SQL, is } from "drizzle-orm-beta";
+import { DrizzleQueryError, SQL, is } from "drizzle-orm-beta";
 import {
 	type Dialect,
 	type DrizzleSession,
@@ -9,6 +9,7 @@ import {
 	type PrepareMethod,
 	copyPreparedState,
 	prepareOn,
+	readMember,
 	runExec,
 } from "../internal/drizzle.js";
 import { type Driver, type Execution, assertNever } from "./driver.js";
@@ -123,6 +124,23 @@ function statementStep(statement: SQL, rules: DialectRules): Step {
 	};
 }
 
+/**
+ * Drizzle's error for the unit's first query, for an error of no statement:
+ * the transaction driver's COMMIT. Without middleware, the query's own
+ * commit fails, and Drizzle reports it on the query.
+ */
+function commitError(items: readonly QueryItem[], error: unknown): unknown {
+	const query = items[0]?.prepareArgs[0];
+	const text = readMember(query, "sql");
+	const params = readMember(query, "params");
+	if (typeof text !== "string" || !Array.isArray(params)) return error;
+	return new DrizzleQueryError(
+		text,
+		params,
+		error instanceof Error ? error : new Error(String(error)),
+	);
+}
+
 /** A query on a transaction that has ended, which would skip the middleware. */
 export function transactionEnded(): Error {
 	return new Error(
@@ -148,6 +166,26 @@ export function runUnit(
 	const pick = (values: readonly unknown[]) =>
 		values.slice(first, first + items.length);
 	const { driver } = target;
+	// An error of no statement (the COMMIT) belongs to the unit's first query.
+	let stepFailed = false;
+	const counted =
+		(step: Step): Step =>
+		(session) => {
+			try {
+				const result = step(session);
+				if (result instanceof Promise)
+					return result.catch((error: unknown) => {
+						stepFailed = true;
+						throw error;
+					});
+				return result;
+			} catch (error) {
+				stepFailed = true;
+				throw error;
+			}
+		};
+	const onQuery = (error: unknown): unknown =>
+		stepFailed ? error : commitError(items, error);
 
 	switch (driver.kind) {
 		case "batch": {
@@ -156,31 +194,38 @@ export function runUnit(
 			);
 			return driver
 				.use((spec) =>
-					runRecordedBatch(spec, target.session, executions, {
-						inTransaction: target.inTransaction,
-					}),
+					runRecordedBatch(
+						spec,
+						target.session,
+						executions,
+						{ inTransaction: target.inTransaction },
+						items.length > 0 ? first : 0,
+					),
 				)
 				.then(pick);
 		}
 		case "transaction": {
 			if (driver.mode === "sync") {
 				const body = (session: DrizzleSession) =>
-					steps.map((step) => step(session));
-				return pick(
-					target.inTransaction
-						? body(target.session)
-						: driver.run(target.session, body),
-				);
+					steps.map((step) => counted(step)(session));
+				if (target.inTransaction) return pick(body(target.session));
+				try {
+					return pick(driver.run(target.session, body));
+				} catch (error) {
+					throw onQuery(error);
+				}
 			}
 			const body = async (session: DrizzleSession) => {
 				const values: unknown[] = [];
-				for (const step of steps) values.push(await step(session));
+				for (const step of steps) values.push(await counted(step)(session));
 				return values;
 			};
 			return (
 				target.inTransaction
 					? body(target.session)
-					: driver.run(target.session, body)
+					: driver.run(target.session, body).catch((error: unknown) => {
+							throw onQuery(error);
+						})
 			).then(pick);
 		}
 		case "rejected":
