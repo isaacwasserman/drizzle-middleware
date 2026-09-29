@@ -537,6 +537,42 @@ for (const driver of drivers) {
 			expect(await db.select().from(t.users)).toHaveLength(2);
 		});
 
+		test("when the first query fails, the whole transaction fails, even if the callback catches the error", async () => {
+			await reset();
+			const wrapped = withMiddleware(db, () => ({
+				before: [insertLog("before")],
+			}));
+			// log.v is NOT NULL.
+			const failing = (tx: any) => tx.insert(t.log).values({ v: null });
+			const second = (tx: any) => tx.insert(t.users).values({ name: "second" });
+			let later = "not sent";
+			if (driver.sync)
+				expect(() =>
+					wrapped.transaction((tx: any) => {
+						expect(() => failing(tx).run()).toThrow();
+						try {
+							second(tx).run();
+							later = "ran";
+						} catch (error) {
+							later = (error as Error).message;
+						}
+					}),
+				).toThrow();
+			else
+				await expect(
+					wrapped.transaction(async (tx: any) => {
+						await Promise.resolve(failing(tx)).catch(() => {});
+						later = await Promise.resolve(second(tx)).then(
+							() => "ran",
+							(error: Error) => error.message,
+						);
+					}),
+				).rejects.toThrow();
+			expect(later).toContain("first query failed");
+			expect(await db.select().from(t.users)).toEqual([]);
+			expect(await logged()).toEqual([]);
+		});
+
 		test("a rolled-back savepoint does not undo the transaction's before", async () => {
 			await reset();
 			const wrapped = withMiddleware(db, () => ({

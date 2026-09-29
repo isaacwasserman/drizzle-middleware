@@ -66,6 +66,12 @@ interface Scope {
 	 * connection after the COMMIT or ROLLBACK.
 	 */
 	ended: boolean;
+	/**
+	 * The error of the scope's first unit (the one that carries `before`).
+	 * If it fails, the whole transaction fails and rolls back, even when the
+	 * callback catches the error.
+	 */
+	failed: { error: unknown } | undefined;
 	/** Units and savepoints admitted by the scope that have not settled. */
 	open: number;
 	/** Resolves `whenIdle`, when `open` goes back to 0. */
@@ -96,10 +102,35 @@ function whenIdle(scope: Scope): Promise<void> {
  * the handler stops that rejection from being reported as unhandled when
  * nothing else waits for it.
  */
-function settlesBefore(result: PromiseLike<unknown>): Promise<void> {
+function settlesBefore(
+	scope: Scope,
+	result: PromiseLike<unknown>,
+): Promise<void> {
 	const done = Promise.resolve(result).then(() => undefined);
-	done.catch(() => undefined);
+	done.catch((error: unknown) => {
+		scope.failed ??= { error };
+	});
 	return done;
+}
+
+/** Runs the scope's first unit; a sync failure marks the scope as failed. */
+function runFirst(scope: Scope, run: () => unknown): unknown {
+	try {
+		return run();
+	} catch (error) {
+		scope.failed ??= { error };
+		throw error;
+	}
+}
+
+/** Throws when the scope takes no more work. */
+function assertOpen(scope: Scope): void {
+	if (scope.ended) throw transactionEnded();
+	if (scope.failed)
+		throw new Error(
+			"drizzle-middleware: the transaction's first query failed, so the transaction rolls back.",
+			{ cause: scope.failed.error },
+		);
 }
 
 /** The state that a wrapped session carries. */
@@ -334,10 +365,12 @@ function withScope(
 ): unknown {
 	const { scope } = state;
 	if (scope === undefined) return body([]);
-	if (scope.ended) throw transactionEnded();
+	assertOpen(scope);
 	if (scope.beforeDone === undefined) {
-		const result = body(scope.statements.before);
-		scope.beforeDone = isThenable(result) ? settlesBefore(result) : "sync";
+		const result = runFirst(scope, () => body(scope.statements.before));
+		scope.beforeDone = isThenable(result)
+			? settlesBefore(scope, result)
+			: "sync";
 		return admit(scope, result);
 	}
 	const done = scope.beforeDone;
@@ -353,13 +386,15 @@ function withScope(
 function openNested(state: WrapState, open: () => unknown): unknown {
 	const { scope } = state;
 	if (scope === undefined) return open();
-	if (scope.ended) throw transactionEnded();
+	assertOpen(scope);
 	if (scope.beforeDone === undefined) {
 		const { before } = scope.statements;
 		if (before.length === 0) scope.beforeDone = "sync";
 		else {
-			const ran = runUnit(target(state), { before, after: [] }, []);
-			scope.beforeDone = isThenable(ran) ? settlesBefore(ran) : "sync";
+			const ran = runFirst(scope, () =>
+				runUnit(target(state), { before, after: [] }, []),
+			);
+			scope.beforeDone = isThenable(ran) ? settlesBefore(scope, ran) : "sync";
 		}
 	}
 	const done = scope.beforeDone;
@@ -378,6 +413,7 @@ function runTransaction(
 		beforeDone: undefined,
 		ended: false,
 		open: 0,
+		failed: undefined,
 		onIdle: undefined,
 	};
 	const finish = (txSession: DrizzleSession): unknown => {
@@ -411,6 +447,7 @@ function runTransaction(
 				const result = fn(scoped);
 				rejectAsyncCallback(state, result);
 				end();
+				if (scope.failed) throw scope.failed.error;
 				finish(txDb.session);
 				return result;
 			}
@@ -426,6 +463,7 @@ function runTransaction(
 				end();
 				await whenIdle(scope);
 				if ("error" in outcome) throw outcome.error;
+				if (scope.failed) throw scope.failed.error;
 				if (scope.beforeDone instanceof Promise) await scope.beforeDone;
 				await finish(txDb.session);
 				return outcome.value;
@@ -645,7 +683,7 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		if (typeof setTransaction === "function")
 			Object.defineProperty(db, "setTransaction", {
 				value: (...args: unknown[]) => {
-					if (state.scope?.ended) throw transactionEnded();
+					if (state.scope) assertOpen(state.scope);
 					return Reflect.apply(setTransaction, rawDb, args);
 				},
 			});
