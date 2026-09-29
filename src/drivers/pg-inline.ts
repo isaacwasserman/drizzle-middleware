@@ -5,6 +5,8 @@
 // values are written into the SQL text instead, as literals that behave like
 // the parameters the driver would have sent.
 
+import { isIdentifierChar, scanPostgres } from "../core/sql-text.js";
+
 /** How the driver types a parameter: untyped, or one Postgres type. */
 export type ParamType = "unknown" | "boolean" | "int8" | "bytea";
 
@@ -55,9 +57,6 @@ export function literal(value: unknown, inference: Inference): string {
 	return type === "unknown" ? `E'${escaped}'` : `(E'${escaped}'::${type})`;
 }
 
-const isIdentifierChar = (c: string | undefined) =>
-	c !== undefined && /[A-Za-z0-9_$\u0080-\uffff]/.test(c);
-
 /** One `$n` placeholder: where it is in the SQL text, and its number. */
 interface Placeholder {
 	readonly start: number;
@@ -75,98 +74,25 @@ export function findPlaceholders(
 	paramCount: number,
 ): Placeholder[] {
 	const found: Placeholder[] = [];
-	const n = sql.length;
-	let i = 0;
-	while (i < n) {
-		const c = sql[i];
-		const next = sql[i + 1];
-		if (c === "'") {
-			const prev = sql[i - 1];
-			const escapeString =
-				(prev === "E" || prev === "e") && !isIdentifierChar(sql[i - 2]);
-			let j = i + 1;
-			for (;;) {
-				if (j >= n) throw new InlineError("a string literal is not closed");
-				const d = sql[j];
-				if (d === "\\" && escapeString) {
-					j += 2;
-					continue;
-				}
-				if (d === "\\") {
-					// With standard_conforming_strings off, a backslash escapes the
-					// next character; with it on, it is literal. The string ends in
-					// the same place either way, except when a quote follows an odd
-					// number of backslashes.
-					let k = j;
-					while (sql[k] === "\\") k++;
-					if (sql[k] === "'" && (k - j) % 2 === 1)
-						throw new InlineError(
-							"a quote after an odd number of backslashes ends a string literal in a place that depends on standard_conforming_strings",
-						);
-					j = k;
-					continue;
-				}
-				if (d === "'") {
-					if (sql[j + 1] === "'") {
-						j += 2;
-						continue;
-					}
-					break;
-				}
-				j++;
-			}
-			i = j + 1;
-		} else if (c === '"') {
-			let j = i + 1;
-			for (;;) {
-				const end = sql.indexOf('"', j);
-				if (end === -1)
-					throw new InlineError("a quoted identifier is not closed");
-				if (sql[end + 1] === '"') {
-					j = end + 2;
-					continue;
-				}
-				i = end + 1;
-				break;
-			}
-		} else if (c === "-" && next === "-") {
-			const end = sql.indexOf("\n", i);
-			i = end === -1 ? n : end;
-		} else if (c === "/" && next === "*") {
-			let depth = 0;
-			let j = i;
-			do {
-				if (j >= n) throw new InlineError("a comment is not closed");
-				if (sql[j] === "/" && sql[j + 1] === "*") {
-					depth++;
-					j += 2;
-				} else if (sql[j] === "*" && sql[j + 1] === "/") {
-					depth--;
-					j += 2;
-				} else j++;
-			} while (depth > 0);
-			i = j;
-		} else if (c === "$" && !isIdentifierChar(sql[i - 1])) {
-			const rest = sql.slice(i);
-			const placeholder = /^\$(\d+)/.exec(rest);
-			const tag =
-				/^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/.exec(rest);
-			if (placeholder) {
-				const index = Number(placeholder[1]);
-				if (index < 1 || index > paramCount)
-					throw new InlineError(
-						`the query uses $${index}, but has ${paramCount} parameters`,
-					);
-				found.push({ start: i, end: i + placeholder[0].length, index });
-				i += placeholder[0].length;
-			} else if (tag) {
-				const end = sql.indexOf(tag[0], i + tag[0].length);
-				if (end === -1)
-					throw new InlineError("a dollar-quoted string is not closed");
-				i = end + tag[0].length;
-			} else i++;
-		} else i++;
-	}
+	scanPostgres(
+		sql,
+		(i) => {
+			const placeholder =
+				sql[i] === "$" && !isIdentifierChar(sql[i - 1])
+					? /^\$(\d+)/.exec(sql.slice(i))
+					: null;
+			if (!placeholder) return 1;
+			const index = Number(placeholder[1]);
+			if (index < 1 || index > paramCount)
+				throw new InlineError(
+					`the query uses $${index}, but has ${paramCount} parameters`,
+				);
+			found.push({ start: i, end: i + placeholder[0].length, index });
+			return placeholder[0].length;
+		},
+		(problem) => new InlineError(problem),
+		"strict",
+	);
 	const used = new Set(found.map((p) => p.index));
 	for (let index = 1; index <= paramCount; index++)
 		if (!used.has(index))

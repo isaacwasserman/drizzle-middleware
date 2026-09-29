@@ -14,6 +14,7 @@ import {
 } from "../internal/drizzle.js";
 import { type Driver, type Execution, assertNever } from "./driver.js";
 import { runRecordedBatch } from "./engine.js";
+import { assertSingleStatement } from "./sql-text.js";
 import type { Middleware } from "./types.js";
 
 /** How a dialect runs a middleware statement. */
@@ -141,6 +142,12 @@ function commitError(items: readonly QueryItem[], error: unknown): unknown {
 	);
 }
 
+/** The SQL text of a query item (its prepared query's first argument). */
+export function queryText(item: QueryItem): string | undefined {
+	const text = readMember(item.prepareArgs[0], "sql");
+	return typeof text === "string" ? text : undefined;
+}
+
 /** A query on a transaction that has ended, which would skip the middleware. */
 export function transactionEnded(): Error {
 	return new Error(
@@ -157,6 +164,16 @@ export function runUnit(
 	statements: Statements,
 	items: readonly QueryItem[],
 ): unknown[] | Promise<unknown[]> {
+	// Checked before anything runs, so a rejected text sends nothing.
+	for (const statement of [...statements.before, ...statements.after])
+		assertSingleStatement(
+			target.session.dialect.sqlToQuery(statement).sql,
+			target.rules.name,
+		);
+	for (const item of items) {
+		const text = queryText(item);
+		if (text !== undefined) assertSingleStatement(text, target.rules.name);
+	}
 	const steps: Step[] = [
 		...statements.before.map((s) => statementStep(s, target.rules)),
 		...items.map(queryStep),

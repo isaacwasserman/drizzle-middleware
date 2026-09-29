@@ -46,6 +46,13 @@ describe("inline encoder: placeholders", () => {
 			).toEqual([1]);
 	});
 
+	// Postgres ends a line comment at a carriage return too.
+	test("a line comment ends at a carriage return", () => {
+		expect(
+			findPlaceholders("select 1 -- a note\r, $1", 1).map((p) => p.index),
+		).toEqual([1]);
+	});
+
 	test("throws when the SQL is ambiguous or does not match the parameters", () => {
 		const cases: [string, unknown[]][] = [
 			["select '\\' || $1", ["x"]],

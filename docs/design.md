@@ -147,6 +147,7 @@ A driver counts as supported only when its tests run against the real driver (se
 5. **Recording check.** If a Drizzle prepared query makes zero or more than one driver call while it is recorded, the unit throws.
 6. **Construction check.** The wrapped db must hold the wrapped session and dialect, or `withMiddleware` throws.
 7. **Batch API calls that skip the middleware** (`db.batch()` and similar) go through the unit, or they throw.
+8. **One statement per SQL text.** A text with more than one statement throws, before anything is sent: in a query and in a middleware statement, on every driver. The check lexes the text (strings, quoted identifiers, dollar quotes and comments do not end a statement; a trailing `;` is allowed). For Postgres it reads a plain string literal both with backslashes literal and as escapes (`standard_conforming_strings` on and off), and a second statement in either reading throws.
 
 ## 9. Types
 

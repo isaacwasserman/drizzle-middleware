@@ -23,6 +23,7 @@ import {
 	runExec,
 } from "../internal/drizzle.js";
 import type { Driver } from "./driver.js";
+import { assertSingleStatement } from "./sql-text.js";
 import type { Middleware } from "./types.js";
 import {
 	type DialectRules,
@@ -30,6 +31,7 @@ import {
 	type Statements,
 	collectStatements,
 	isEmpty,
+	queryText,
 	runUnit,
 	transactionEnded,
 } from "./unit.js";
@@ -393,7 +395,12 @@ function runQuery(
 	raw: DrizzlePreparedQuery,
 	item: QueryItem,
 ): unknown {
-	const direct = () => runExec(raw, item.execMethod, item.execArgs);
+	const direct = () => {
+		const text = queryText(item);
+		if (text !== undefined)
+			assertSingleStatement(text, state.config.rules.name);
+		return runExec(raw, item.execMethod, item.execArgs);
+	};
 	return exclusive(state, () =>
 		withScope(state, (scopeBefore) => {
 			const own = collectStatements(state.layers);

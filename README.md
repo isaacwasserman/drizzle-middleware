@@ -131,6 +131,7 @@ The `tx` inside `db.transaction(fn)` has the brand too.
 ## What throws
 
 - A driver that is not in the table above.
+- A SQL text with more than one statement, in a query or in a middleware statement. Send each statement as its own query, or as its own middleware statement.
 - A transaction passed to `withMiddleware`, or a db whose client is a transaction handle (for example a Bun SQL `begin` handle). Pass the db, on the pool.
 - A db with a Drizzle query cache. A cache key has no middleware context, so a cached result could reach a caller whose middleware gives a different result.
 - `db.$client` on a wrapped db. A query sent on the driver client does not run the middleware. Use the unwrapped db's `$client` if you need the driver.

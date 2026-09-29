@@ -500,6 +500,49 @@ for (const driver of drivers) {
 			}
 		});
 
+		// Rule: one statement per SQL text. Rejected before anything runs.
+		test("a SQL text with more than one statement is rejected before anything runs", async () => {
+			await reset();
+			const run = (q: any, text: ReturnType<typeof sql>) =>
+				driver.dialect === "pg" ? q.execute(text) : q.run(text);
+			const two = sql`insert into ${t.log} (v) values ('one'); insert into ${t.log} (v) values ('two')`;
+			// Drizzle's SQLite run() wraps the error; the package's is its cause.
+			const messages = (error: unknown): string =>
+				error instanceof Error
+					? `${error.message} | ${messages(error.cause)}`
+					: "";
+			const rejects = async (call: () => unknown) => {
+				let failure: unknown;
+				try {
+					await call();
+				} catch (error) {
+					failure = error;
+				}
+				expect(messages(failure)).toContain("more than one statement");
+			};
+			// In a middleware statement.
+			await rejects(() =>
+				withMiddleware(db, () => ({ before: [two] }))
+					.select()
+					.from(t.users)
+					.then(),
+			);
+			// In a query, with and without middleware.
+			await rejects(() =>
+				run(
+					withMiddleware(db, () => ({ before: [insertLog("b")] })),
+					two,
+				),
+			);
+			await rejects(() =>
+				run(
+					withMiddleware(db, () => ({})),
+					two,
+				),
+			);
+			expect(await logged()).toEqual([]);
+		});
+
 		test("blocks $client and direct driver access", () => {
 			const wrapped = withMiddleware(db, () => ({}));
 			expect(() => wrapped.$client).toThrow("blocked access to `$client`");
