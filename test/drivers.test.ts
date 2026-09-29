@@ -593,6 +593,80 @@ for (const driver of drivers) {
 			expect(await logged()).toEqual(["outer", "inner", "kept"]);
 		});
 
+		// A sync driver cannot leave work running when its callback returns.
+		test.skipIf(driver.sync)(
+			"a query that starts after the callback settles cannot run outside the transaction",
+			async () => {
+				await reset();
+				const wrapped = withMiddleware(db, () => ({
+					before: [insertLog("before")],
+				}));
+				const failed = new Error("validation failed");
+				// Still running on the connection when the other branch fails.
+				const slow =
+					driver.dialect === "pg"
+						? sql`select pg_sleep(0.1)`
+						: sql`with recursive c(x) as (select 1 union all select x + 1 from c where x < 300000) select count(*) from c`;
+				let late: Promise<string> = Promise.resolve("not sent");
+				const run = wrapped.transaction(async (tx: any) => {
+					await Promise.all([
+						(async () => {
+							await tx.select().from(t.users);
+							throw failed;
+						})(),
+						(async () => {
+							await (driver.dialect === "pg" ? tx.execute(slow) : tx.all(slow));
+							// Promise.all has rejected; this branch goes on.
+							late = Promise.resolve(
+								tx.insert(t.users).values({ name: "late" }),
+							).then(
+								() => "ran",
+								(error: Error) => error.message,
+							);
+						})(),
+					]);
+				});
+				await expect(run).rejects.toThrow(failed);
+				await Bun.sleep(20);
+				expect(await late).toContain("the transaction has ended");
+				expect(await db.select().from(t.users)).toEqual([]);
+				expect(await logged()).toEqual([]);
+			},
+		);
+
+		test.skipIf(driver.sync)(
+			"work that starts before the callback returns finishes inside the transaction",
+			async () => {
+				await reset();
+				const wrapped = withMiddleware(db, () => ({
+					before: [insertLog("before")],
+				}));
+				let floating: Promise<unknown> = Promise.resolve();
+				// Not awaited: the callback returns while the insert is on its way.
+				await wrapped.transaction(async (tx: any) => {
+					floating = Promise.resolve(
+						tx.insert(t.log).values({ v: "floating" }),
+					);
+				});
+				await floating;
+				expect(await logged()).toEqual(["before", "floating"]);
+
+				// When the callback fails, the same work rolls back with it.
+				await reset();
+				const failed = new Error("roll back");
+				await expect(
+					wrapped.transaction(async (tx: any) => {
+						floating = Promise.resolve(
+							tx.insert(t.log).values({ v: "floating" }),
+						);
+						throw failed;
+					}),
+				).rejects.toThrow(failed);
+				await floating.catch(() => {});
+				expect(await logged()).toEqual([]);
+			},
+		);
+
 		test("a tx kept after wrapped.transaction ends cannot send queries", async () => {
 			await reset();
 			const wrapped = withMiddleware(db, () => ({

@@ -206,6 +206,19 @@ describe("withMiddleware (pg)", () => {
 	// Transactions
 	// -------------------------------------------------------------------
 
+	test("setTransaction() on a tx kept after its transaction ends throws", async () => {
+		const { db } = await createDb();
+		let kept: any;
+		await withMiddleware(db, () => ({
+			before: [insertLog("b")],
+		})).transaction(async (tx) => {
+			kept = tx;
+		});
+		expect(() => kept.setTransaction({ accessMode: "read only" })).toThrow(
+			"the transaction has ended",
+		);
+	});
+
 	test("wrapped.transaction forwards the transaction config", async () => {
 		const { db } = await createDb();
 		const wrapped = withMiddleware(db, () => ({ before: [insertLog("b")] }));

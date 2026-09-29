@@ -79,7 +79,7 @@ await withMiddleware(baseDb, middleware).transaction(async (tx) => {
 
 `setTransaction()` on a wrapped transaction runs without middleware, because Postgres requires `SET TRANSACTION` to be the first statement of a transaction.
 
-A `tx` that you keep after its transaction ends throws on each query. On bun:sqlite and better-sqlite3, the transaction callback must be sync: the driver commits when the callback returns, so an async callback throws a `TypeError`, and its transaction rolls back.
+When the callback settles, the transaction closes for new work: a query on `tx` that starts after that throws. Work that started before, for example a query that the callback did not await, finishes inside the transaction before the COMMIT or ROLLBACK. A `tx` that you keep after its transaction ends throws on each query. On bun:sqlite and better-sqlite3, the transaction callback must be sync: the driver commits when the callback returns, so an async callback throws a `TypeError`, and its transaction rolls back.
 
 ## Stacking
 

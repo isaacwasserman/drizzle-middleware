@@ -60,8 +60,46 @@ interface Scope {
 	readonly statements: Statements;
 	/** Settles when `before` has run; `undefined` until the first query. */
 	beforeDone: Promise<void> | "sync" | undefined;
-	/** Set when the transaction has committed or rolled back. */
+	/**
+	 * Set when the callback settles: from then on, work on `tx` throws. Work
+	 * admitted before finishes first, so no statement of the scope reaches the
+	 * connection after the COMMIT or ROLLBACK.
+	 */
 	ended: boolean;
+	/** Units and savepoints admitted by the scope that have not settled. */
+	open: number;
+	/** Resolves `whenIdle`, when `open` goes back to 0. */
+	onIdle: (() => void) | undefined;
+}
+
+/** Counts `result` as open work of the scope until it settles. */
+function admit(scope: Scope, result: unknown): unknown {
+	if (!isThenable(result)) return result;
+	scope.open++;
+	const settle = () => {
+		scope.open--;
+		if (scope.open === 0) scope.onIdle?.();
+	};
+	result.then(settle, settle);
+	return result;
+}
+
+function whenIdle(scope: Scope): Promise<void> {
+	if (scope.open === 0) return Promise.resolve();
+	return new Promise((resolve) => {
+		scope.onIdle = resolve;
+	});
+}
+
+/**
+ * The promise that `beforeDone` holds. It rejects when the first unit fails;
+ * the handler stops that rejection from being reported as unhandled when
+ * nothing else waits for it.
+ */
+function settlesBefore(result: PromiseLike<unknown>): Promise<void> {
+	const done = Promise.resolve(result).then(() => undefined);
+	done.catch(() => undefined);
+	return done;
 }
 
 /** The state that a wrapped session carries. */
@@ -299,12 +337,11 @@ function withScope(
 	if (scope.ended) throw transactionEnded();
 	if (scope.beforeDone === undefined) {
 		const result = body(scope.statements.before);
-		scope.beforeDone =
-			result instanceof Promise ? result.then(() => undefined) : "sync";
-		return result;
+		scope.beforeDone = isThenable(result) ? settlesBefore(result) : "sync";
+		return admit(scope, result);
 	}
 	const done = scope.beforeDone;
-	return done === "sync" ? body([]) : done.then(() => body([]));
+	return admit(scope, done === "sync" ? body([]) : done.then(() => body([])));
 }
 
 /**
@@ -322,12 +359,11 @@ function openNested(state: WrapState, open: () => unknown): unknown {
 		if (before.length === 0) scope.beforeDone = "sync";
 		else {
 			const ran = runUnit(target(state), { before, after: [] }, []);
-			scope.beforeDone =
-				ran instanceof Promise ? ran.then(() => undefined) : "sync";
+			scope.beforeDone = isThenable(ran) ? settlesBefore(ran) : "sync";
 		}
 	}
 	const done = scope.beforeDone;
-	return done === "sync" ? open() : done.then(open);
+	return admit(scope, done === "sync" ? open() : done.then(open));
 }
 
 /** `wrapped.transaction(fn)`: the middleware runs once for the transaction. */
@@ -337,7 +373,13 @@ function runTransaction(
 	config: unknown,
 ): unknown {
 	const statements = collectStatements(state.layers);
-	const scope: Scope = { statements, beforeDone: undefined, ended: false };
+	const scope: Scope = {
+		statements,
+		beforeDone: undefined,
+		ended: false,
+		open: 0,
+		onIdle: undefined,
+	};
 	const finish = (txSession: DrizzleSession): unknown => {
 		if (isEmpty(statements)) return undefined;
 		const remaining: Statements = {
@@ -368,14 +410,25 @@ function runTransaction(
 			if (isSync(state)) {
 				const result = fn(scoped);
 				rejectAsyncCallback(state, result);
+				end();
 				finish(txDb.session);
 				return result;
 			}
 			return (async () => {
-				const result = await fn(scoped);
+				let outcome: { value: unknown } | { error: unknown };
+				try {
+					outcome = { value: await fn(scoped) };
+				} catch (error) {
+					outcome = { error };
+				}
+				// No new work on `tx` from here. Work admitted before finishes
+				// before `after` and the COMMIT or ROLLBACK are sent.
+				end();
+				await whenIdle(scope);
+				if ("error" in outcome) throw outcome.error;
 				if (scope.beforeDone instanceof Promise) await scope.beforeDone;
 				await finish(txDb.session);
-				return result;
+				return outcome.value;
 			})();
 		}, config);
 	return exclusive(state, () => {
@@ -578,8 +631,10 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		const setTransaction = readMember(rawDb, "setTransaction");
 		if (typeof setTransaction === "function")
 			Object.defineProperty(db, "setTransaction", {
-				value: (...args: unknown[]) =>
-					Reflect.apply(setTransaction, rawDb, args),
+				value: (...args: unknown[]) => {
+					if (state.scope?.ended) throw transactionEnded();
+					return Reflect.apply(setTransaction, rawDb, args);
+				},
 			});
 	}
 	return db;
