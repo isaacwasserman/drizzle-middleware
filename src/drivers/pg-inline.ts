@@ -23,9 +23,7 @@ export const postgresJsInference: Inference = (value) =>
 
 export class InlineError extends TypeError {
 	constructor(problem: string) {
-		super(
-			`drizzle-middleware: cannot inline this query for a driver with \`prepare: false\`: ${problem}.`,
-		);
+		super(`drizzle-middleware: cannot send this query safely: ${problem}.`);
 		this.name = "InlineError";
 	}
 }
@@ -90,12 +88,22 @@ export function findPlaceholders(
 			for (;;) {
 				if (j >= n) throw new InlineError("a string literal is not closed");
 				const d = sql[j];
-				if (d === "\\") {
-					if (!escapeString)
-						throw new InlineError(
-							"a string literal contains a backslash, whose meaning depends on standard_conforming_strings",
-						);
+				if (d === "\\" && escapeString) {
 					j += 2;
+					continue;
+				}
+				if (d === "\\") {
+					// With standard_conforming_strings off, a backslash escapes the
+					// next character; with it on, it is literal. The string ends in
+					// the same place either way, except when a quote follows an odd
+					// number of backslashes.
+					let k = j;
+					while (sql[k] === "\\") k++;
+					if (sql[k] === "'" && (k - j) % 2 === 1)
+						throw new InlineError(
+							"a quote after an odd number of backslashes ends a string literal in a place that depends on standard_conforming_strings",
+						);
+					j = k;
 					continue;
 				}
 				if (d === "'") {

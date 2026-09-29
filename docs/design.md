@@ -121,7 +121,7 @@ A driver counts as supported only when its tests run against the real driver (se
 
 - **Default:** every value is a parameter. The package never puts a value into SQL text.
 - **Exception:** postgres-js with `prepare: false`. The strict encoder writes each value as an `E'…'` literal:
-  - The placeholders are found with a small SQL lexer that skips string literals, quoted identifiers, dollar-quoted strings and comments. A backslash in a plain string literal throws, because its meaning depends on `standard_conforming_strings`. Every parameter must be used, and no placeholder may be out of range.
+  - The placeholders are found with a small SQL lexer that skips string literals, quoted identifiers, dollar-quoted strings and comments. In a plain string literal, a backslash escapes the next character only when `standard_conforming_strings` is off. So a quote after an odd number of backslashes ends the string in a different place with the setting on and off, and that case throws. Any other backslash ends the string in the same place either way, so it is accepted. The same lexer splits the SQL for Bun SQL's tagged calls. Every parameter must be used, and no placeholder may be out of range.
   - The literal copies postgres-js's parameter typing: booleans, bigints and bytes are cast (`::boolean`, `::int8`, `::bytea`), everything else is untyped.
   - `\` becomes `\\` and `'` becomes `''`. The literal does not depend on `standard_conforming_strings`.
   - Accepted values: string, number, bigint, boolean, null, `Uint8Array` (hex `bytea` form). Drizzle's own column encoders produce only these.

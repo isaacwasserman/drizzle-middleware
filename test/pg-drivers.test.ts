@@ -407,6 +407,36 @@ for (const driver of drivers) {
 				}),
 		);
 
+		// Bun SQL (tagged calls) and postgres-js (prepare: false) split the SQL
+		// at its placeholders with the inline lexer.
+		test("a backslash in a string literal works as without middleware", async () => {
+			const wrapped = withMiddleware(db, () => ({
+				before: [insertLog("b")],
+			}));
+			const query = sql`select 'a\\b' as s, ${"x"}::text as v`;
+			const rows = (r: any) => Array.from(r.rows ?? r);
+			expect(rows(await wrapped.execute(query))).toEqual(
+				rows(await db.execute(query)),
+			);
+		});
+
+		// Bun starts a tagged query as soon as it is created, so a query that
+		// cannot be split must be rejected before any query is created.
+		test("a query whose SQL cannot be split leaves the connection usable", async () => {
+			const wrapped = withMiddleware(db, () => ({
+				before: [insertLog("b")],
+			}));
+			// A quote after one backslash: where the string ends depends on
+			// standard_conforming_strings.
+			await Promise.resolve(
+				wrapped.execute(sql.raw("select 'a\\''b' as s")),
+			).catch(() => {});
+			expect(await wrapped.select().from(t.users)).toBeArray();
+			expect(
+				Array.from((await db.execute(sql`select 1 as x`)).rows ?? []),
+			).toBeArray();
+		});
+
 		test("bytea values keep every byte", async () => {
 			await reset();
 			const data = Buffer.from([0, 1, 39, 92, 255]);

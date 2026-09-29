@@ -36,9 +36,21 @@ describe("inline encoder: placeholders", () => {
 		);
 	});
 
+	// A backslash in a plain string literal is literal with
+	// standard_conforming_strings on, and an escape with it off. Only a quote
+	// after an odd number of backslashes ends the string in different places.
+	test("accepts backslashes in a string literal wherever the string ends in the same place", () => {
+		for (const text of ["'a\\b'", "'\\\\'", "'a\\\\\\b'", "'\\\\'''"])
+			expect(
+				findPlaceholders(`select ${text}, $1`, 1).map((p) => p.index),
+			).toEqual([1]);
+	});
+
 	test("throws when the SQL is ambiguous or does not match the parameters", () => {
 		const cases: [string, unknown[]][] = [
 			["select '\\' || $1", ["x"]],
+			["select 'a\\''b' || $1", ["x"]],
+			["select '\\\\\\' || $1", ["x"]],
 			["select 'not closed", []],
 			['select "not closed', []],
 			["select $$ not closed", []],
@@ -165,6 +177,13 @@ describe.skipIf(!url)("inline encoder against Postgres (postgres-js)", () => {
 					Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
 				);
 				await check("?::jsonb", '{"a":"x\'y\\\\z"}');
+				// Backslashes in the query's own string literals: the lexer must
+				// find the same placeholders with both settings.
+				for (const s of ["x", "'", "\\"]) {
+					await check("'a\\b' || ?", s);
+					await check("'\\\\' || ?", s);
+					await check("'\\\\''' || ?", s);
+				}
 				await check("5 = ?", "5");
 			}
 		} finally {

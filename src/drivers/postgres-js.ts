@@ -40,6 +40,8 @@ interface SqlCall {
 	readonly sql: string;
 	readonly params: readonly unknown[];
 	readonly mode: "rows" | "values";
+	/** For tagged calls: the SQL split at its placeholders, before any send. */
+	readonly strings?: readonly string[];
 }
 
 type Query = PromiseLike<unknown> & { values(): PromiseLike<unknown> };
@@ -115,7 +117,7 @@ function query(
 ): PromiseLike<unknown> {
 	let q: Query;
 	if (mode === "tagged") {
-		const strings = splitAtPlaceholders(s.sql, s.params.length);
+		const strings = s.strings ?? splitAtPlaceholders(s.sql, s.params.length);
 		const template: TemplateStrings = Object.assign([...strings], {
 			raw: [...strings],
 		});
@@ -160,14 +162,22 @@ async function sendUnit(
 	pinned: boolean,
 ): Promise<unknown[]> {
 	const client = readMember(session, "client");
-	const statements =
+	// Everything that can reject the SQL runs before a connection is reserved
+	// and before any query is created: Bun starts a tagged query as soon as it
+	// is created.
+	const statements: readonly SqlCall[] =
 		mode === "inline"
 			? calls.map((c) => ({
 					sql: inlineParams(c.sql, c.params, inference),
 					params: [],
 					mode: c.mode,
 				}))
-			: calls;
+			: mode === "tagged"
+				? calls.map((c) => ({
+						...c,
+						strings: splitAtPlaceholders(c.sql, c.params.length),
+					}))
+				: calls;
 
 	if (context.inTransaction) {
 		// Inside the transaction's own client: no BEGIN or COMMIT.
