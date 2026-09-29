@@ -128,6 +128,16 @@ listUsers(db); // ok
 
 The `tx` inside `db.transaction(fn)` has the brand too.
 
+`withMiddleware` accepts a db, not a transaction, at compile time too. Inside a generic function, TypeScript cannot prove that a type parameter is not a transaction, so type the parameter with `PgDb` (or `SqliteDb`), which passes the check on to the caller:
+
+```ts
+import { withMiddleware, type PgDb } from "drizzle-middleware/pg";
+
+function withTenant<TDb extends NodePgDatabase<any>>(db: PgDb<TDb>) {
+  return withMiddleware(db, tenantMiddleware);
+}
+```
+
 ## What throws
 
 - A driver that is not in the table above.
@@ -142,6 +152,7 @@ The `tx` inside `db.transaction(fn)` has the brand too.
 
 - **node-postgres:** `pg` is an optional peer dependency, loaded only when you wrap a node-postgres db.
 - **One connection: node-postgres with a `pg.Client` (not a `Pool`), or a Bun SQL reserved connection (`await sql.reserve()`):** the client is one connection, and Drizzle opens transactions on it. The package queues all work that goes through wrapped dbs on the same client, like a pool of one connection: while a `wrapped.transaction(fn)` is open, other units wait for it to end. Queries on the unwrapped db do not go through this queue. Inside `wrapped.transaction(fn)`, use `tx`, not the wrapped db. For concurrent requests, use a `Pool`.
+- **postgres-js, `prepare: false`:** the rows, `count` and `command` of `.execute()` are the same as without middleware; `statement` shows the SQL with the values inlined, and `columns` is `undefined` for a statement without rows.
 - **postgres-js and a lost connection:** postgres-js 3.4.9 does not recover a pool of one connection (`max: 1`) after a connection is lost inside `reserve()` or a transaction, with or without this package. The package reserves a connection for each unit, so use `max` of 2 or more.
 - **postgres-js:** with `prepare: true`, the first run of each query text on a connection costs about one extra round trip per statement, while postgres-js learns the parameter types. After that, it is one round trip.
 - **Bun SQL:** one round trip needs Bun 1.4 or newer and `prepare: true` (the default).

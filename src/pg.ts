@@ -10,7 +10,7 @@ import {
 } from "./core/wrap.js";
 import { CONFIGS, PG_CONFIG } from "./dialects.js";
 
-export type { BatchResults, Middleware, WithMiddleware };
+export type { BatchResults, Middleware, PgDb, WithMiddleware };
 
 /** Wraps a Postgres Drizzle db with middleware. A transaction throws. */
 export function withMiddleware<TDb>(

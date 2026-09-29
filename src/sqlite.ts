@@ -7,7 +7,7 @@ import type {
 import { withMiddlewareWith } from "./core/wrap.js";
 import { SQLITE_CONFIG } from "./dialects.js";
 
-export type { BatchResults, Middleware, WithMiddleware };
+export type { BatchResults, Middleware, SqliteDb, WithMiddleware };
 export { executeBatchTransaction } from "./pg.js";
 
 /** Wraps a SQLite Drizzle db with middleware. A transaction throws. */

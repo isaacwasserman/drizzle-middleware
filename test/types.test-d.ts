@@ -104,6 +104,15 @@ sqliteOnly(pg);
 // @ts-expect-error -- not a db
 pgOnly({ session: {}, dialect: {} });
 
+// A generic helper passes the constraint on with PgDb<TDb>.
+declare function wrapPg<TDb>(db: PgDb<TDb>): WithMiddleware<TDb>;
+function withTenant<TDb>(db: PgDb<TDb>): WithMiddleware<TDb> {
+	return wrapPg(db);
+}
+const fromHelper: Pg = withTenant(pg);
+// @ts-expect-error -- a transaction, also through the helper
+withTenant(pgTx);
+
 // -----------------------------------------------------------------------
 // Middleware
 // -----------------------------------------------------------------------
@@ -167,6 +176,7 @@ const calls: number = batchDriver(spec).use((s) => {
 });
 
 void [
+	fromHelper,
 	asSyncBase,
 	id,
 	client,
