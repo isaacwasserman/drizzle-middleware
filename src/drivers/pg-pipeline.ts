@@ -74,18 +74,41 @@ class Pipeline {
 	}
 
 	// Called by node-postgres when the query reaches the front of its queue.
-	submit(value: unknown): void {
+	// All values are converted before anything is written: a value that
+	// throws after some statements were sent, with no Sync, would leave the
+	// connection waiting inside a transaction. A returned error makes
+	// node-postgres drop the query and take the next one, as for its own
+	// queries.
+	submit(value: unknown): Error | null {
 		const connection = asConnection(value);
-		for (const call of this.calls) {
-			connection.parse({ text: call.config.text }, true);
-			connection.bind(
-				{ values: call.values.map((v) => this.deps.prepareValue(v)) },
-				true,
-			);
-			connection.describe({ type: "P" }, true);
-			connection.execute({ rows: 0 }, true);
+		const values: unknown[][] = [];
+		for (const [index, call] of this.calls.entries()) {
+			try {
+				values.push(call.values.map((v) => this.deps.prepareValue(v)));
+			} catch (error) {
+				const failure = new BatchError(index, error);
+				this.failed = true;
+				this.reject(failure);
+				return failure;
+			}
 		}
-		connection.sync();
+		// Buffer the messages and send them at once, as node-postgres does.
+		const stream = readMember(value, "stream");
+		const cork = readMember(stream, "cork");
+		const uncork = readMember(stream, "uncork");
+		if (typeof cork === "function") Reflect.apply(cork, stream, []);
+		try {
+			for (const [index, call] of this.calls.entries()) {
+				connection.parse({ text: call.config.text }, true);
+				connection.bind({ values: values[index] }, true);
+				connection.describe({ type: "P" }, true);
+				connection.execute({ rows: 0 }, true);
+			}
+			connection.sync();
+		} finally {
+			if (typeof uncork === "function") Reflect.apply(uncork, stream, []);
+		}
+		return null;
 	}
 
 	private current(): PgResult | undefined {
@@ -130,6 +153,11 @@ export function runPipeline(
 	calls: readonly PgCall[],
 	deps: PgPipelineDeps,
 ): Promise<PgResult[]> {
+	// A pool's query() would check out a client and never release it.
+	if (pgClientKind(client) !== "client")
+		throw new TypeError(
+			"drizzle-middleware: the batch must run on one node-postgres client, not on a pool",
+		);
 	const query = readMember(client, "query");
 	if (typeof query !== "function")
 		throw new TypeError("drizzle-middleware: the client has no query()");
@@ -138,14 +166,30 @@ export function runPipeline(
 	return pipeline.done;
 }
 
-/** Drizzle's own check: a node-postgres Pool, not a Client or PoolClient. */
-export function isPool(client: unknown): boolean {
-	const name = readMember(readMember(client, "constructor"), "name");
-	return (
-		typeof name === "string" &&
-		name.includes("Pool") &&
-		typeof readMember(client, "connect") === "function"
-	);
+/**
+ * What a node-postgres client is. Drizzle treats a client as a pool when it
+ * is an instance of pg's Pool (the class `BoundPool`) or its class name
+ * contains "Pool"; it then opens each transaction on a checked-out client,
+ * and otherwise on the client itself. A pool has no `connection`; a Client
+ * or PoolClient has one. A client that Drizzle and its shape disagree on is
+ * "unknown", and rejected.
+ */
+export function pgClientKind(client: unknown): "pool" | "client" | "unknown" {
+	const names: unknown[] = [];
+	for (
+		let proto: unknown = Object.getPrototypeOf(client);
+		proto !== null && proto !== undefined;
+		proto = Object.getPrototypeOf(proto)
+	)
+		names.push(readMember(readMember(proto, "constructor"), "name"));
+	const own = names[0];
+	const drizzlePool =
+		names.includes("BoundPool") ||
+		(typeof own === "string" && own.includes("Pool"));
+	const hasConnection = typeof readMember(client, "connection") === "object";
+	if (drizzlePool && !hasConnection) return "pool";
+	if (!drizzlePool && hasConnection) return "client";
+	return "unknown";
 }
 
 /** Reads the query config and values of one `client.query(...)` call. */

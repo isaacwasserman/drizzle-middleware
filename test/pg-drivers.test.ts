@@ -268,6 +268,145 @@ for (const driver of drivers) {
 			).toEqual([]);
 		});
 
+		// Plain Drizzle recovers from each of these; the connection that the
+		// unit used must not be left stuck or broken in the pool.
+		(driver.name === "node-postgres" ? test : test.skip)(
+			"a value that the driver cannot convert leaves the connection usable",
+			async () => {
+				await reset();
+				const cannotConvert = {
+					toPostgres() {
+						throw new Error("cannot convert");
+					},
+				};
+				const client = new pg.Client({ connectionString: url as string });
+				await client.connect();
+				try {
+					for (const onDb of [db, nodePg({ client })]) {
+						const wrapped = withMiddleware(onDb, () => ({
+							before: [insertLog("before")],
+						}));
+						// The second statement's value throws after the first was prepared.
+						await expect(
+							Promise.resolve(
+								wrapped.execute(sql`select ${cannotConvert}::text`),
+							),
+						).rejects.toThrow();
+						expect(await wrapped.select().from(t.users)).toEqual([]);
+					}
+				} finally {
+					await client.end();
+				}
+			},
+		);
+
+		(driver.name === "node-postgres" ? test : test.skip)(
+			"a pg.Pool subclass does not leak connections",
+			async () => {
+				class AppDatabase extends pg.Pool {}
+				const pool = new AppDatabase({ connectionString: url, max: 2 });
+				try {
+					const wrapped = withMiddleware(nodePg({ client: pool }), () => ({
+						before: [sql`select set_config('app.tenant', 'acme', true)`],
+					}));
+					for (let i = 0; i < 4; i++)
+						expect(await wrapped.execute(sql`select 1 as x`)).toMatchObject({
+							rows: [{ x: 1 }],
+						});
+					expect(pool.idleCount).toBe(pool.totalCount);
+				} finally {
+					await pool.end();
+				}
+			},
+		);
+
+		/** Runs `body`; an uncaught exception during it fails the test. */
+		async function withoutUncaught(body: () => Promise<void>) {
+			const uncaught: unknown[] = [];
+			const onUncaught = (error: unknown) => uncaught.push(error);
+			process.on("uncaughtException", onUncaught);
+			try {
+				await body();
+				await Bun.sleep(50);
+			} finally {
+				process.off("uncaughtException", onUncaught);
+			}
+			expect(uncaught).toEqual([]);
+		}
+
+		(driver.name === "node-postgres" ? test : test.skip)(
+			"a network drop during a unit does not crash or leave a broken client",
+			() =>
+				withoutUncaught(async () => {
+					const target = new URL(url as string);
+					const proxy = await startLatencyProxy(
+						{ host: target.hostname, port: Number(target.port || 5432) },
+						0,
+					);
+					const viaProxy = new URL(url as string);
+					viaProxy.hostname = "127.0.0.1";
+					viaProxy.port = String(proxy.port);
+					const pool = new pg.Pool({
+						connectionString: viaProxy.toString(),
+						max: 2,
+					});
+					try {
+						const wrapped = withMiddleware(nodePg({ client: pool }), () => ({
+							before: [sql`select set_config('app.tenant', 'acme', true)`],
+						}));
+						await wrapped.execute(sql`select 1`);
+						const unit = Promise.resolve(
+							wrapped.execute(sql`select pg_sleep(1)`),
+						);
+						unit.catch(() => {});
+						await Bun.sleep(200);
+						proxy.dropConnections();
+						await expect(unit).rejects.toThrow();
+						for (let i = 0; i < 4; i++)
+							await wrapped.execute(sql`select 1 as x`);
+					} finally {
+						await pool.end();
+						await proxy.close();
+					}
+				}),
+		);
+
+		// postgres-js's release() puts a closed connection back in its open list.
+		// With a pool of one, postgres-js does not recover from a lost connection
+		// in reserve() or a transaction, with or without the middleware.
+		(driver.name.startsWith("postgres-js") ? test : test.skip)(
+			"a backend terminated during a unit leaves the pool usable",
+			() =>
+				withoutUncaught(async () => {
+					const client = postgres(url as string, {
+						max: 3,
+						onnotice: () => {},
+						...(driver.name.includes("prepare: false")
+							? { prepare: false }
+							: {}),
+					});
+					try {
+						const wrapped = withMiddleware(postgresJs({ client }), () => ({
+							before: [sql`select set_config('app.tenant', 'acme', true)`],
+						}));
+						const unit = Promise.resolve(
+							wrapped.execute(sql`select pg_sleep(1) as terminated_here`),
+						);
+						unit.catch(() => {});
+						await Bun.sleep(200);
+						await db.execute(
+							sql`select pg_terminate_backend(pid) from pg_stat_activity where pid <> pg_backend_pid() and query like '%terminated_here%'`,
+						);
+						await expect(unit).rejects.toThrow();
+						for (let i = 0; i < 5; i++)
+							await wrapped.execute(sql`select 1 as x`);
+						await client`select 1`;
+					} finally {
+						await Promise.race([client.end(), Bun.sleep(500)]);
+					}
+				}),
+		);
+
 		test("bytea values keep every byte", async () => {
 			await reset();
 			const data = Buffer.from([0, 1, 39, 92, 255]);

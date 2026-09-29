@@ -1,13 +1,13 @@
 // node-postgres (and pg-compatible clients): the pipeline strategy.
 
-import { type DriverEntry, batchDriver } from "../core/driver.js";
+import { type Driver, type DriverEntry, batchDriver } from "../core/driver.js";
 import { copySession, readMember } from "../internal/drizzle.js";
 import {
 	type PgCall,
 	type PgPipelineDeps,
 	type PgResult,
 	asPgResult,
-	isPool,
+	pgClientKind,
 	runPipeline,
 	toPgCall,
 } from "./pg-pipeline.js";
@@ -39,16 +39,40 @@ async function send(
 	calls: readonly PgCall[],
 ): Promise<PgResult[]> {
 	const deps = await loadPg();
-	if (!isPool(client)) return runPipeline(client, calls, deps);
+	if (pgClientKind(client) === "client")
+		return runPipeline(client, calls, deps);
 	const connect = readMember(client, "connect");
 	if (typeof connect !== "function")
 		throw new TypeError("drizzle-middleware: the pool has no connect()");
 	const connection: unknown = await Reflect.apply(connect, client, []);
+	// While the client is checked out, the pool does not listen for its
+	// errors; a lost connection would be an uncaught 'error' event. pg-pool's
+	// own query() listens the same way.
+	let lost: unknown;
+	const onError = (error: unknown) => {
+		lost = error;
+	};
+	const on = readMember(connection, "on");
+	const off = readMember(connection, "off");
+	if (typeof on === "function")
+		Reflect.apply(on, connection, ["error", onError]);
+	let failure: unknown;
 	try {
 		return await runPipeline(connection, calls, deps);
+	} catch (error) {
+		failure = error;
+		throw error;
 	} finally {
+		if (typeof off === "function")
+			Reflect.apply(off, connection, ["error", onError]);
+		// A failed unit gives the client back with the error, so the pool
+		// destroys it, as pg-pool's own query() does for every error. The
+		// connection may be lost even when the error came from the server
+		// (a terminated backend reports FATAL, then closes).
+		const broken = lost ?? failure;
 		const release = readMember(connection, "release");
-		if (typeof release === "function") Reflect.apply(release, connection, []);
+		if (typeof release === "function")
+			Reflect.apply(release, connection, broken === undefined ? [] : [broken]);
 	}
 }
 
@@ -56,13 +80,20 @@ async function send(
 // checked out) is one connection, and Drizzle opens its transactions on it.
 // Work from another request sent during an open transaction would run inside
 // it, so the client's work runs one item at a time, like a pool of one.
-// Drizzle's own pool check covers more than `isPool`, so the queue is on
+// `pgClientKind` follows Drizzle's own pool check, so the queue is on
 // whenever Drizzle shares the connection.
 export const nodePostgres: DriverEntry = {
 	sessionKind: "NodePgSession",
 	dialect: "pg",
-	driverFor: (session) =>
-		batchDriver<PgCall, PgResult>(
+	driverFor: (session): Driver => {
+		const kind = pgClientKind(readMember(session, "client"));
+		if (kind === "unknown")
+			return {
+				kind: "rejected",
+				reason:
+					"its client is neither a node-postgres Pool nor a Client as Drizzle sees it",
+			};
+		return batchDriver<PgCall, PgResult>(
 			{
 				strategy: "pipeline",
 				recordingSession: (s, recorder) =>
@@ -74,6 +105,7 @@ export const nodePostgres: DriverEntry = {
 					}),
 				send: (s, calls) => send(readMember(s, "client"), calls),
 			},
-			isPool(readMember(session, "client")) ? undefined : serializeOnClient,
-		),
+			kind === "pool" ? undefined : serializeOnClient,
+		);
+	},
 };

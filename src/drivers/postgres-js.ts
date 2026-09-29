@@ -201,12 +201,16 @@ async function sendUnit(
 				: unit.slice(0, -1)
 	).map((s) => query(reserved, s, mode));
 	const guardOpen = guarded && oneFlight;
+	let lost = false;
 	try {
 		const settled = await Promise.allSettled(sent);
 		if (!oneFlight)
 			settled.push(
 				...(await Promise.allSettled([query(reserved, COMMIT, mode)])),
 			);
+		lost = settled.some(
+			(s) => s.status === "rejected" && isConnectionLost(s.reason),
+		);
 		const begin = settled[0];
 		const commit = settled[unit.length - 1];
 		const inner = settled.slice(1, unit.length - 1);
@@ -221,16 +225,42 @@ async function sendUnit(
 			throw silentRollback(sent.slice(1, unit.length - 1));
 		return valuesOf(inner);
 	} finally {
-		let released = pinned;
+		// postgres-js has already moved a lost connection to its closed list;
+		// release() would put it back in the open list, and the next query on
+		// it would hang.
+		let released = pinned || lost;
 		const release = () => {
 			if (released) return;
 			released = true;
 			const fn = readMember(reserved, "release");
 			if (typeof fn === "function") Reflect.apply(fn, reserved, []);
 		};
-		if (guardOpen) closeGuard(reserved, release);
+		if (guardOpen && !lost) closeGuard(reserved, release);
 		else release();
 	}
+}
+
+/**
+ * postgres-js's own codes for a closed connection, and the socket errors
+ * that make it close one. A server error, even FATAL, is not included:
+ * postgres-js can report a stale FATAL error on the next query of a new,
+ * live connection, which must go back to the pool.
+ */
+const LOST_CONNECTION = new Set([
+	"CONNECTION_CLOSED",
+	"CONNECTION_DESTROYED",
+	"CONNECTION_ENDED",
+	"ECONNRESET",
+	"ECONNABORTED",
+	"EPIPE",
+	"ETIMEDOUT",
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+]);
+
+function isConnectionLost(error: unknown): boolean {
+	const code = readMember(error, "code");
+	return typeof code === "string" && LOST_CONNECTION.has(code);
 }
 
 /**
@@ -247,7 +277,9 @@ function closeGuard(reserved: unknown, release: () => void): void {
 			return true;
 		},
 	});
-	rollback.then(release, release);
+	rollback.then(release, (error: unknown) => {
+		if (!isConnectionLost(error)) release();
+	});
 }
 
 async function reserveOn(client: unknown): Promise<unknown> {

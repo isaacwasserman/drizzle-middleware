@@ -16,6 +16,8 @@ export async function startLatencyProxy(
 	/** The round trips since the last call to `resetRoundTrips()`. */
 	roundTrips(): number;
 	resetRoundTrips(): void;
+	/** Resets every open connection, like a network drop; new ones still work. */
+	dropConnections(): void;
 	close(): Promise<void>;
 }> {
 	const sockets = new Set<net.Socket>();
@@ -54,6 +56,9 @@ export async function startLatencyProxy(
 		resetRoundTrips: () => {
 			roundTrips = 0;
 			replied = true;
+		},
+		dropConnections: () => {
+			for (const s of sockets) s.resetAndDestroy();
 		},
 		close: () =>
 			new Promise<void>((resolve) => {
