@@ -31,6 +31,10 @@ import { withMiddleware as withSqlite } from "../src/sqlite.ts";
 
 const url = process.env.TEST_PG_URL;
 
+// A Bun SQL reserved connection is one connection, like a pg.Client.
+const bunPool = url ? new SQL({ url, max: 2 }) : undefined;
+const bunReserved = bunPool ? await bunPool.reserve() : undefined;
+
 // -----------------------------------------------------------------------
 // Tables: the same columns in both dialects
 // -----------------------------------------------------------------------
@@ -189,6 +193,18 @@ const drivers: DriverCase[] = [
 					},
 					(client, config) => bunSql({ client, ...config }),
 				),
+				{
+					name: "Bun SQL (reserved connection)",
+					dialect: "pg",
+					sync: false,
+					open: (config) => ({
+						db: bunSql({ client: bunReserved as SQL, ...config }),
+						close: async () => {
+							bunReserved?.release();
+							await bunPool?.close();
+						},
+					}),
+				} satisfies DriverCase,
 				tcpPg(
 					"Bun SQL (prepare: false)",
 					(u) => {

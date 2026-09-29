@@ -33,7 +33,7 @@ import {
 	postgresJsInference,
 	splitAtPlaceholders,
 } from "./pg-inline.js";
-import { drizzleAsyncTransaction } from "./transactions.js";
+import { drizzleAsyncTransaction, serializeOnClient } from "./transactions.js";
 
 /** One `client.unsafe(sql, params)` call, and whether Drizzle wanted `.values()`. */
 interface SqlCall {
@@ -157,6 +157,7 @@ async function sendUnit(
 	context: SendContext,
 	mode: SendMode,
 	inference: Inference,
+	pinned: boolean,
 ): Promise<unknown[]> {
 	const client = readMember(session, "client");
 	const statements =
@@ -176,12 +177,9 @@ async function sendUnit(
 		return valuesOf(settled);
 	}
 
-	const reserve = readMember(client, "reserve");
-	if (typeof reserve !== "function")
-		throw new TypeError(
-			"drizzle-middleware: the driver client has no reserve(), so the batch cannot run in one transaction on one connection.",
-		);
-	const reserved: unknown = await Reflect.apply(reserve, client, []);
+	// A pinned client is already one connection (its work is queued), so the
+	// unit runs on it. Otherwise the unit reserves a connection from the pool.
+	const reserved: unknown = pinned ? client : await reserveOn(client);
 
 	// postgres-js retries a cached prepared statement that the server rejects
 	// as out of date (for example after ALTER TABLE). It writes the retry after
@@ -223,7 +221,7 @@ async function sendUnit(
 			throw silentRollback(sent.slice(1, unit.length - 1));
 		return valuesOf(inner);
 	} finally {
-		let released = false;
+		let released = pinned;
 		const release = () => {
 			if (released) return;
 			released = true;
@@ -250,6 +248,15 @@ function closeGuard(reserved: unknown, release: () => void): void {
 		},
 	});
 	rollback.then(release, release);
+}
+
+async function reserveOn(client: unknown): Promise<unknown> {
+	const reserve = readMember(client, "reserve");
+	if (typeof reserve !== "function")
+		throw new TypeError(
+			"drizzle-middleware: the driver client has no reserve(), so the batch cannot run in one transaction on one connection.",
+		);
+	return Reflect.apply(reserve, client, []);
 }
 
 const BEGIN: SqlCall = { sql: "begin", params: [], mode: "rows" };
@@ -284,6 +291,11 @@ interface DriverRules {
 	readonly inference: Inference;
 	/** How this client's batches are sent, or "sequential" if they cannot be. */
 	mode(client: unknown): SendMode | "sequential";
+	/**
+	 * "pool" for a client that gives each unit its own connection, "connection"
+	 * for one connection (like a `pg.Client`), or why the client is rejected.
+	 */
+	clientKind(client: unknown): "pool" | "connection" | { rejected: string };
 }
 
 const prepareDisabled = (client: unknown) =>
@@ -292,6 +304,9 @@ const prepareDisabled = (client: unknown) =>
 const POSTGRES_JS: DriverRules = {
 	sessionKind: "PostgresJsSession",
 	inference: postgresJsInference,
+	// A postgres-js reserved client has no reserve() or begin(), so units and
+	// transactions on it throw.
+	clientKind: () => "pool",
 	// Only `prepare: false` inlines values. withMiddleware accepts only a db,
 	// so the client is always the top-level client, which has `options`.
 	mode: (client) => (prepareDisabled(client) ? "inline" : "prepared"),
@@ -305,9 +320,42 @@ function bunAtLeast14(): boolean {
 	return major > 1 || (major === 1 && minor >= 4);
 }
 
+/**
+ * Bun names each SQL handle: the pool is `sql`, a reserved connection is
+ * `reserved_sql` (with `release()`), and a transaction or savepoint handle is
+ * `transaction_sql` (with `savepoint()`).
+ */
+export function bunClientKind(
+	client: unknown,
+): "pool" | "connection" | "transaction" | "unknown" {
+	if (typeof client !== "function") return "unknown";
+	const name = readMember(client, "name");
+	const has = (member: string) =>
+		typeof readMember(client, member) === "function";
+	if (name === "transaction_sql" || has("savepoint")) return "transaction";
+	if (name === "reserved_sql" && has("release")) return "connection";
+	if (name === "sql" && !has("release")) return "pool";
+	return "unknown";
+}
+
+// A unit on a transaction handle would reserve another connection, outside
+// that transaction.
+export const bunTransactionHandle =
+	"its client is a transaction handle; pass the SQL client (the pool)";
+
 const BUN_SQL: DriverRules = {
 	sessionKind: "BunSQLSession",
 	inference: postgresJsInference,
+	clientKind: (client) => {
+		const kind = bunClientKind(client);
+		if (kind === "pool" || kind === "connection") return kind;
+		return {
+			rejected:
+				kind === "transaction"
+					? bunTransactionHandle
+					: "its client is not a Bun SQL client, a reserved connection or a transaction",
+		};
+	},
 	mode: (client) =>
 		prepareDisabled(client) || !bunAtLeast14() ? "sequential" : "tagged",
 };
@@ -317,20 +365,33 @@ function entry(rules: DriverRules): DriverEntry {
 		sessionKind: rules.sessionKind,
 		dialect: "pg",
 		driverFor: (session): Driver => {
-			const mode = rules.mode(readMember(session, "client"));
-			if (mode === "sequential") return drizzleAsyncTransaction("sequential");
-			return batchDriver<SqlCall, unknown>({
-				strategy:
-					mode === "inline"
-						? "pipelined-transaction-inline"
-						: "pipelined-transaction",
-				recordingSession: (s, recorder) =>
-					copySession(s, {
-						client: recordingClient((call) => recorder.record(call)),
-					}),
-				send: (s, calls, context) =>
-					sendUnit(s, calls, context, mode, rules.inference),
-			});
+			const client = readMember(session, "client");
+			const kind = rules.clientKind(client);
+			if (typeof kind === "object")
+				return { kind: "rejected", reason: kind.rejected };
+			// One connection: Drizzle opens transactions on it, so its work runs
+			// one item at a time, like a pool of one (see node-postgres).
+			const pinned = kind === "connection";
+			const mode = rules.mode(client);
+			if (mode === "sequential") {
+				const driver = drizzleAsyncTransaction("sequential");
+				return pinned ? { ...driver, serialize: serializeOnClient } : driver;
+			}
+			return batchDriver<SqlCall, unknown>(
+				{
+					strategy:
+						mode === "inline"
+							? "pipelined-transaction-inline"
+							: "pipelined-transaction",
+					recordingSession: (s, recorder) =>
+						copySession(s, {
+							client: recordingClient((call) => recorder.record(call)),
+						}),
+					send: (s, calls, context) =>
+						sendUnit(s, calls, context, mode, rules.inference, pinned),
+				},
+				pinned ? serializeOnClient : undefined,
+			);
 		},
 	};
 }

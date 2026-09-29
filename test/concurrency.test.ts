@@ -76,6 +76,18 @@ const pgUrlTargets: Target[] = url
 				const client = new SQL({ url, max: 10 });
 				return { db: bunSql({ client }), close: () => client.close() };
 			}),
+			// One connection: Drizzle opens transactions on the reserved connection.
+			pgTarget("Bun SQL (reserved connection)", async () => {
+				const pool = new SQL({ url, max: 10 });
+				const reserved = await pool.reserve();
+				return {
+					db: bunSql({ client: reserved }),
+					close: async () => {
+						reserved.release();
+						await pool.close();
+					},
+				};
+			}),
 			pgTarget("Bun SQL (prepare: false)", async () => {
 				const client = new SQL({ url, max: 10, prepare: false });
 				return { db: bunSql({ client }), close: () => client.close() };

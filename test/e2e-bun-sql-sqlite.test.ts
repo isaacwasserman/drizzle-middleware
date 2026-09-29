@@ -41,6 +41,16 @@ async function createDb() {
 }
 
 describe("e2e: Bun SQL SQLite", () => {
+	// A unit on a transaction handle would run outside that transaction.
+	test("a transaction handle as the client is rejected", async () => {
+		const { client } = await createDb();
+		await client.begin(async (tx) => {
+			expect(() =>
+				withMiddleware(drizzle({ client: tx as SQL }), () => ({})),
+			).toThrow("transaction handle");
+		});
+	});
+
 	test("no middleware: the query runs directly, without a transaction", async () => {
 		const { client, db } = await createDb();
 		await db.insert(users).values({ name: "Ada" });

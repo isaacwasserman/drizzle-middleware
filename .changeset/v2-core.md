@@ -23,7 +23,7 @@ New execution core. The middleware now fails closed: if it cannot run your state
 - `db.batch()` and other Drizzle APIs that would skip the middleware throw.
 - On bun:sqlite and better-sqlite3, an async transaction callback throws. The driver commits when the callback returns, so the queries after an `await` ran outside the transaction, without the middleware.
 - A query on a `tx` after its transaction ends throws.
-- `withMiddleware` accepts a db, not a transaction. Use `withMiddleware(db, middleware).transaction(fn)`.
+- `withMiddleware` accepts a db, not a transaction. Use `withMiddleware(db, middleware).transaction(fn)`. A db whose client is a Bun SQL transaction handle is rejected too.
 - Drivers other than the ones above are rejected.
 - `withMiddleware` returns `WithMiddleware<typeof db>`, which is still assignable to `typeof db`.
 

@@ -10,10 +10,16 @@ import {
 import {
 	type Dialect,
 	type DrizzleSession,
+	readMember,
 	sessionKindOf,
 } from "../internal/drizzle.js";
 import { nodePostgres } from "./node-postgres.js";
-import { bunSqlPostgres, postgresJs } from "./postgres-js.js";
+import {
+	bunClientKind,
+	bunSqlPostgres,
+	bunTransactionHandle,
+	postgresJs,
+} from "./postgres-js.js";
 import {
 	drizzleAsyncTransaction,
 	drizzleSyncTransaction,
@@ -47,7 +53,17 @@ const betterSqlite3: DriverEntry = {
 const bunSqlSqlite: DriverEntry = {
 	sessionKind: "BunSQLiteSession",
 	dialect: "sqlite",
-	driverFor: () => serializedAsyncTransaction(),
+	driverFor: (session) => {
+		const kind = bunClientKind(readMember(session, "client"));
+		if (kind === "pool") return serializedAsyncTransaction();
+		return {
+			kind: "rejected",
+			reason:
+				kind === "transaction"
+					? bunTransactionHandle
+					: "its client is not a Bun SQL SQLite client",
+		};
+	},
 };
 
 const ENTRIES: ReadonlyMap<string, DriverEntry> = new Map(

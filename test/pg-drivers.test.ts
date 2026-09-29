@@ -161,6 +161,24 @@ for (const driver of drivers) {
 			);
 		};
 
+		// A unit on a transaction handle would reserve another connection,
+		// outside that transaction.
+		(driver.name.startsWith("Bun SQL") ? test : test.skip)(
+			"a transaction handle as the client is rejected",
+			async () => {
+				const client = new SQL({ url: url as string, max: 1 });
+				try {
+					await client.begin(async (tx) => {
+						expect(() =>
+							withMiddleware(bunSql({ client: tx as SQL }), () => ({})),
+						).toThrow("transaction handle");
+					});
+				} finally {
+					await client.close();
+				}
+			},
+		);
+
 		test("transaction-local state reaches the query and is gone after", async () => {
 			const wrapped = withMiddleware(db, () => ({
 				before: [sql`select set_config('app.tenant', ${"acme"}, true)`],
