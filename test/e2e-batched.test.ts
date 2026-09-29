@@ -98,24 +98,24 @@ describe("executeBatchTransaction: pglite", () => {
 			wrapped.execute(sql`select 1`),
 		];
 		for (const notBuilder of notBuilders)
-			expect(() =>
+			await expect(
 				executeBatchTransaction([
 					db.select().from(users),
 					notBuilder as PromiseLike<unknown>,
 				]),
-			).toThrow(TypeError);
+			).rejects.toThrow(TypeError);
 	});
 
 	test("rejects queries from different database instances", async () => {
 		const dbA = await createPgDb();
 		const dbB = await createPgDb();
 
-		expect(() =>
+		await expect(
 			executeBatchTransaction([
 				dbA.select().from(users),
 				dbB.select().from(users),
 			]),
-		).toThrow(TypeError);
+		).rejects.toThrow(TypeError);
 	});
 });
 

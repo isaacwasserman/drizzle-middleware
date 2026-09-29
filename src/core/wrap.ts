@@ -498,7 +498,20 @@ function collectItem(
 	};
 }
 
+/**
+ * Runs the batch at once (a sync driver runs it inside the caller's sync
+ * transaction), and reports every error as a rejected promise.
+ */
 export function executeBatchTransactionWith(
+	configs: readonly DialectConfig[],
+	queries: readonly unknown[],
+): Promise<unknown[]> {
+	return new Promise((resolve) => {
+		resolve(runBatch(configs, queries));
+	});
+}
+
+function runBatch(
 	configs: readonly DialectConfig[],
 	queries: readonly unknown[],
 ): Promise<unknown[]> {

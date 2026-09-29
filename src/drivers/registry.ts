@@ -90,20 +90,20 @@ export function driverFor(dialect: Dialect, session: DrizzleSession): Driver {
 		const driver = entry.driverFor(session);
 		if (driver.kind === "rejected")
 			throw new TypeError(
-				`drizzle-middleware: withMiddleware is not compatible with ${kind}: ${driver.reason}.`,
+				`drizzle-middleware: not compatible with ${kind}: ${driver.reason}.`,
 			);
 		return driver;
 	}
 	const plan = planOf(kind);
 	if (plan !== undefined && "rejected" in plan)
 		throw new TypeError(
-			`drizzle-middleware: withMiddleware is not compatible with ${kind}: ${plan.rejected}.`,
+			`drizzle-middleware: not compatible with ${kind}: ${plan.rejected}.`,
 		);
 	if (plan !== undefined)
 		throw new TypeError(
 			`drizzle-middleware: ${kind} is planned but not supported yet.`,
 		);
 	throw new TypeError(
-		`drizzle-middleware: withMiddleware is not compatible with ${kind}: it is not a known Drizzle driver session.`,
+		`drizzle-middleware: not compatible with ${kind}: it is not a known Drizzle driver session.`,
 	);
 }

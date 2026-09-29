@@ -470,6 +470,31 @@ for (const driver of drivers) {
 			expect(await logged()).toEqual(["before", "after"]);
 		});
 
+		// Builders from a raw transaction: the batch either runs inside that
+		// transaction or throws, depending on the driver. It never writes
+		// outside it.
+		test("executeBatchTransaction with builders from a raw transaction never writes outside it", async () => {
+			await reset();
+			const rollBack = new Error("roll back");
+			const batch = (tx: any) =>
+				executeBatchTransaction([tx.insert(t.users).values({ name: "Ada" })]);
+			if (driver.sync)
+				expect(() =>
+					db.transaction((tx: any) => {
+						batch(tx).catch(() => {});
+						throw rollBack;
+					}),
+				).toThrow(rollBack);
+			else
+				await expect(
+					db.transaction(async (tx: any) => {
+						await batch(tx).catch(() => {});
+						throw rollBack;
+					}),
+				).rejects.toThrow(rollBack);
+			expect(await db.select().from(t.users)).toEqual([]);
+		});
+
 		test("executeBatchTransaction runs every stacked layer once", async () => {
 			await reset();
 			const inner = withMiddleware(db, () => ({
