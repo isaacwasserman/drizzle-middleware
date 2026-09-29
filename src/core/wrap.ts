@@ -253,15 +253,17 @@ function wrapPrepared(
 				typeof readMember(target, member) === "function"
 			)
 				return (...execArgs: unknown[]) =>
-					runQuery(state, raw, {
-						prepareMethod,
-						prepareArgs,
-						// Checked above: `member` is one of the rules' exec methods.
-						execMethod: member as ExecMethod,
-						execArgs,
-						token,
-						joinsNotNullableMap: readMember(target, "joinsNotNullableMap"),
-					});
+					inDriverStyle(state, () =>
+						runQuery(state, raw, {
+							prepareMethod,
+							prepareArgs,
+							// Checked above: `member` is one of the rules' exec methods.
+							execMethod: member as ExecMethod,
+							execArgs,
+							token,
+							joinsNotNullableMap: readMember(target, "joinsNotNullableMap"),
+						}),
+					);
 			if (member === "setToken")
 				return (value: unknown) => {
 					token = value;
@@ -288,7 +290,7 @@ function wrapSession(state: WrapState): DrizzleSession {
 			}
 			if (member === "transaction")
 				return (fn: (tx: unknown) => unknown, config?: unknown) =>
-					runTransaction(state, fn, config);
+					inDriverStyle(state, () => runTransaction(state, fn, config));
 			return NOT_INTERCEPTED;
 		},
 	);
@@ -316,6 +318,18 @@ function target(state: WrapState) {
 
 const isSync = (state: WrapState) =>
 	state.driver.kind === "transaction" && state.driver.mode === "sync";
+
+/**
+ * On an async driver, a throw from the package becomes a rejected promise,
+ * as Drizzle's own API gives. A sync driver throws, as Drizzle's sync API
+ * does.
+ */
+function inDriverStyle(state: WrapState, run: () => unknown): unknown {
+	if (isSync(state)) return run();
+	return new Promise((resolve) => {
+		resolve(run());
+	});
+}
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
 	typeof readMember(value, "then") === "function";
@@ -711,36 +725,38 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		if (typeof nested === "function")
 			Object.defineProperty(db, "transaction", {
 				value: (fn: (tx: unknown) => unknown, ...rest: unknown[]) =>
-					openNested(state, () =>
-						Reflect.apply(nested, rawDb, [
-							(rawNested: unknown) => {
-								const nestedDb = asDrizzleDb(rawNested);
-								const level: Level = {
-									failed: undefined,
-									parent: state.level,
-								};
-								const result = fn(
-									wrapDb(nestedDb, {
-										...state,
-										session: nestedDb.session,
-										rawDb: nestedDb,
-										level,
-									}),
-								);
-								rejectAsyncCallback(state, result);
-								// A failed query rolls the savepoint back, even when the
-								// callback caught it.
-								if (!isThenable(result)) {
-									throwIfFailed(level);
-									return result;
-								}
-								return Promise.resolve(result).then((value) => {
-									throwIfFailed(level);
-									return value;
-								});
-							},
-							...rest,
-						]),
+					inDriverStyle(state, () =>
+						openNested(state, () =>
+							Reflect.apply(nested, rawDb, [
+								(rawNested: unknown) => {
+									const nestedDb = asDrizzleDb(rawNested);
+									const level: Level = {
+										failed: undefined,
+										parent: state.level,
+									};
+									const result = fn(
+										wrapDb(nestedDb, {
+											...state,
+											session: nestedDb.session,
+											rawDb: nestedDb,
+											level,
+										}),
+									);
+									rejectAsyncCallback(state, result);
+									// A failed query rolls the savepoint back, even when the
+									// callback caught it.
+									if (!isThenable(result)) {
+										throwIfFailed(level);
+										return result;
+									}
+									return Promise.resolve(result).then((value) => {
+										throwIfFailed(level);
+										return value;
+									});
+								},
+								...rest,
+							]),
+						),
 					),
 			});
 		// `SET TRANSACTION` must be the first statement of a transaction, so it
@@ -748,10 +764,11 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		const setTransaction = readMember(rawDb, "setTransaction");
 		if (typeof setTransaction === "function")
 			Object.defineProperty(db, "setTransaction", {
-				value: (...args: unknown[]) => {
-					assertOpen(state);
-					return Reflect.apply(setTransaction, rawDb, args);
-				},
+				value: (...args: unknown[]) =>
+					inDriverStyle(state, () => {
+						assertOpen(state);
+						return Reflect.apply(setTransaction, rawDb, args);
+					}),
 			});
 	}
 	return db;

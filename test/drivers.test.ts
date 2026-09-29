@@ -456,6 +456,50 @@ for (const driver of drivers) {
 			]);
 		});
 
+		// Drizzle's async API rejects; its sync API (bun:sqlite, better-sqlite3)
+		// throws. The package follows the same style.
+		test("an error from the package is a rejection on an async driver, a throw on a sync one", async () => {
+			const failing = withMiddleware(db, () => {
+				throw new Error("factory failed");
+			});
+			let kept: any;
+			if (driver.sync)
+				withMiddleware(db, () => ({})).transaction((tx: any) => {
+					kept = tx;
+				});
+			else
+				await withMiddleware(db, () => ({})).transaction(async (tx: any) => {
+					kept = tx;
+				});
+			const calls: (() => unknown)[] = [
+				() => failing.select().from(t.users).then(),
+				() =>
+					driver.dialect === "pg"
+						? failing.execute(sql`select 1`)
+						: failing.all(sql`select 1`),
+				() => {
+					const prepared = failing.select().from(t.users).prepare("failing");
+					return driver.dialect === "pg" ? prepared.execute() : prepared.all();
+				},
+				() =>
+					driver.sync
+						? failing.transaction(() => {})
+						: failing.transaction(async () => {}),
+				() => kept.select().from(t.users).then(),
+			];
+			for (const call of calls) {
+				if (driver.sync) {
+					expect(call).toThrow();
+					continue;
+				}
+				let result: unknown;
+				expect(() => {
+					result = call();
+				}).not.toThrow();
+				await expect(Promise.resolve(result)).rejects.toThrow();
+			}
+		});
+
 		test("blocks $client and direct driver access", () => {
 			const wrapped = withMiddleware(db, () => ({}));
 			expect(() => wrapped.$client).toThrow("blocked access to `$client`");
