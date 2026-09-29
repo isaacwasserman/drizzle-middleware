@@ -1,67 +1,32 @@
-import { entityKind } from "drizzle-orm-beta";
-import type { PgAsyncDatabase } from "drizzle-orm-beta/pg-core";
+import type {
+	BatchResults,
+	Middleware,
+	PgDb,
+	WithMiddleware,
+} from "./core/types.js";
 import {
-	type Middleware,
-	buildWrappedDb,
-	executeBatch,
-	executeBatchTransaction,
-} from "./shared.js";
+	executeBatchTransactionWith,
+	withMiddlewareWith,
+} from "./core/wrap.js";
+import { CONFIGS, PG_CONFIG } from "./dialects.js";
 
-export type { Middleware };
-export { executeBatchTransaction };
+export type { BatchResults, Middleware, PgDb, WithMiddleware };
 
-const UNSUPPORTED_DRIVERS = new Set(["XataHttpSession", "PgRemoteSession"]);
-
-const SWAPPED_SCHEMA_RELATIONS = new Set(["PostgresJsTransaction"]);
-
-function isPgTransaction(db: unknown): boolean {
-	let proto = Object.getPrototypeOf(db);
-	while (proto != null) {
-		if (proto.constructor?.[entityKind] === "PgAsyncTransaction") return true;
-		proto = Object.getPrototypeOf(proto);
-	}
-	return false;
+/** Wraps a Postgres Drizzle db with middleware. A transaction throws. */
+export function withMiddleware<TDb>(
+	db: PgDb<TDb>,
+	middleware: Middleware,
+): WithMiddleware<TDb> {
+	// The wrapped db is built at runtime from `db`'s own class: `TDb` plus the brand.
+	return withMiddlewareWith(PG_CONFIG, db, middleware) as WithMiddleware<TDb>;
 }
 
-export function withMiddleware<TDb extends PgAsyncDatabase<any, any, any, any>>(
-	db: TDb,
-	middleware: Middleware,
-): TDb {
-	const kind: string = (db as any).session?.constructor?.[entityKind] ?? "";
-	if (UNSUPPORTED_DRIVERS.has(kind)) {
-		throw new Error(
-			`withMiddleware is not compatible with ${kind}. This driver has no multi-statement, batch, or transaction support.`,
-		);
-	}
-	const isTransaction = isPgTransaction(db);
-	const dbKind: string = (db as any).constructor?.[entityKind] ?? "";
-	const swapped = SWAPPED_SCHEMA_RELATIONS.has(dbKind);
-	return buildWrappedDb(db as any, middleware, {
-		rawPrepareArgs: () => [undefined, undefined, false],
-		txPrepareArgs: () => [undefined, undefined, false],
-		makeDbArgs: isTransaction
-			? swapped
-				? (d, dialect, session, schemaArg) => [
-						dialect,
-						session,
-						schemaArg,
-						d._.relations,
-						d.nestedIndex,
-					]
-				: (d, dialect, session, schemaArg) => [
-						dialect,
-						session,
-						d._.relations,
-						schemaArg,
-						d.nestedIndex,
-					]
-			: (d, dialect, session, schemaArg) => [
-					dialect,
-					session,
-					d._.relations,
-					schemaArg,
-				],
-		isTransactionInput: isTransaction,
-		execBatch: executeBatch,
-	}) as TDb;
+/** Runs the queries (and the middleware, if any) as one unit. */
+export function executeBatchTransaction<
+	const T extends readonly PromiseLike<unknown>[],
+>(queries: readonly [...T]): Promise<BatchResults<T>> {
+	// One result per query, in order, as Drizzle maps it.
+	return executeBatchTransactionWith(CONFIGS, queries) as Promise<
+		BatchResults<T>
+	>;
 }

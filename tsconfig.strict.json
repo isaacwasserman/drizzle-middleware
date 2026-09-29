@@ -1,0 +1,14 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"exactOptionalPropertyTypes": true,
+		"noPropertyAccessFromIndexSignature": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noImplicitReturns": true,
+		"isolatedDeclarations": true,
+		"declaration": true,
+		"allowJs": false
+	},
+	"include": ["src/**/*.ts", "test/types.test-d.ts"]
+}

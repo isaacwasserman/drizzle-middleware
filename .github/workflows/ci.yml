@@ -16,7 +16,7 @@ jobs:
 
             - uses: oven-sh/setup-bun@v2
               with:
-                  bun-version: latest
+                  bun-version: 1.4.x
 
             - name: Install dependencies
               run: bun install --frozen-lockfile
@@ -31,7 +31,7 @@ jobs:
 
             - uses: oven-sh/setup-bun@v2
               with:
-                  bun-version: latest
+                  bun-version: 1.4.x
 
             - name: Install dependencies
               run: bun install --frozen-lockfile
@@ -41,12 +41,27 @@ jobs:
 
     test:
         runs-on: ubuntu-latest
+        services:
+            # For the TCP Postgres drivers in the tests.
+            postgres:
+                image: postgres:16
+                env:
+                    POSTGRES_HOST_AUTH_METHOD: trust
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 10
+        env:
+            TEST_PG_URL: postgres://postgres@localhost:5432/postgres
         steps:
             - uses: actions/checkout@v4
 
             - uses: oven-sh/setup-bun@v2
               with:
-                  bun-version: latest
+                  bun-version: 1.4.x
 
             - name: Install dependencies
               run: bun install --frozen-lockfile
@@ -66,7 +81,7 @@ jobs:
 
             - uses: oven-sh/setup-bun@v2
               with:
-                  bun-version: latest
+                  bun-version: 1.4.x
 
             - name: Install dependencies
               run: bun install --frozen-lockfile

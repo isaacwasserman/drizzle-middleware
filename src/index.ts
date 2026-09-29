@@ -1,9 +1,12 @@
 export {
+	type BatchResults,
+	type Middleware,
+	type PgDb,
+	type WithMiddleware,
+	executeBatchTransaction,
 	withMiddleware as withPgMiddleware,
-	type Middleware as PgMiddleware,
 } from "./pg.js";
 export {
+	type SqliteDb,
 	withMiddleware as withSqliteMiddleware,
-	type Middleware as SqliteMiddleware,
 } from "./sqlite.js";
-export { executeBatchTransaction } from "./shared.js";

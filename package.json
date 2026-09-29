@@ -1,7 +1,7 @@
 {
 	"name": "drizzle-middleware",
 	"version": "0.1.0",
-	"description": "Drizzle ORM query middleware",
+	"description": "Run SQL before and after every Drizzle ORM query, in one round trip. Fails closed.",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -23,7 +23,7 @@
 		"prepare": "git config core.hooksPath .githooks",
 		"build": "tsc -p tsconfig.build.json && bun scripts/fix-beta-imports.ts",
 		"test": "bun test",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.strict.json && bun scripts/check-unsafe.ts",
 		"lint": "biome check .",
 		"format": "biome format --write ."
 	},
@@ -37,11 +37,22 @@
 		"@biomejs/biome": "^1.9.4",
 		"@changesets/cli": "^2.30.0",
 		"@electric-sql/pglite": "^0.5.7",
+		"@types/better-sqlite3": "^9.6.0",
 		"@types/bun": "latest",
+		"@types/pg": "^8.23.1",
+		"better-sqlite3": "^13.0.3",
 		"drizzle-orm-beta": "^1.0.0-beta.22",
+		"pg": "^8.23.0",
+		"postgres": "^3.4.9",
 		"typescript": "7"
 	},
 	"peerDependencies": {
-		"drizzle-orm": ">=1.0.0-0"
+		"drizzle-orm": "1.0.0-beta.22",
+		"pg": "^8.0.0"
+	},
+	"peerDependenciesMeta": {
+		"pg": {
+			"optional": true
+		}
 	}
 }

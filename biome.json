@@ -22,8 +22,11 @@
 			"include": ["src/**/*.ts"],
 			"linter": {
 				"rules": {
+					"style": {
+						"noNonNullAssertion": "error"
+					},
 					"suspicious": {
-						"noExplicitAny": "off"
+						"noExplicitAny": "error"
 					}
 				}
 			}
