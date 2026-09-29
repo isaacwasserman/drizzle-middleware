@@ -39,6 +39,19 @@ for (const driver of SYNC_DRIVERS) {
 	});
 
 	describe(driver.name, () => {
+		// Inside the transaction, its `after` could undo the scope's `before`.
+		test("a query on the wrapped db inside its own transaction throws", () => {
+			const db = createDb();
+			const wrapped = withMiddleware(db, middleware);
+			expect(() =>
+				wrapped.transaction(() => {
+					wrapped.select().from(users).all();
+				}),
+			).toThrow("inside its own transaction");
+			// After the transaction, the wrapped db works again.
+			expect(wrapped.select().from(users).all()).toEqual([]);
+		});
+
 		// With an async callback, the queries after an `await` would run after
 		// the commit.
 		test("an async transaction callback throws, rolls back, and cannot send more queries", async () => {

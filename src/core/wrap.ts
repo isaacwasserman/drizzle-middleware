@@ -339,7 +339,26 @@ function rejectAsyncCallback(state: WrapState, result: unknown): void {
  * Runs `body` alone on the connection, when the driver needs that. Work
  * inside a transaction is already alone, and waiting there would deadlock.
  */
+/**
+ * Sync clients with an open `wrapped.transaction(fn)`. A sync transaction
+ * runs to its end without interruption, so a unit on such a client from a
+ * db outside the transaction comes from inside `fn`, where it would run in
+ * the transaction and its `after` could undo the scope's `before`.
+ */
+const openSyncScopes = new WeakMap<object, number>();
+
+function syncClientOf(state: WrapState): object | undefined {
+	if (!isSync(state)) return undefined;
+	const client = readMember(state.session, "client");
+	return typeof client === "object" && client !== null ? client : undefined;
+}
+
 function exclusive(state: WrapState, body: () => unknown): unknown {
+	const client = state.inTransaction ? undefined : syncClientOf(state);
+	if (client !== undefined && (openSyncScopes.get(client) ?? 0) > 0)
+		throw new Error(
+			"drizzle-middleware: a query on the wrapped db inside its own transaction. Use the transaction's `tx`.",
+		);
 	const { driver } = state;
 	const serialize =
 		driver.kind === "batch" ||
@@ -467,7 +486,16 @@ function runTransaction(
 				inTransaction: true,
 			});
 			if (isSync(state)) {
-				const result = fn(scoped);
+				const client = syncClientOf(state);
+				if (client !== undefined)
+					openSyncScopes.set(client, (openSyncScopes.get(client) ?? 0) + 1);
+				let result: unknown;
+				try {
+					result = fn(scoped);
+				} finally {
+					if (client !== undefined)
+						openSyncScopes.set(client, (openSyncScopes.get(client) ?? 1) - 1);
+				}
 				rejectAsyncCallback(state, result);
 				end();
 				throwIfFailed(root);
