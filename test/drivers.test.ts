@@ -568,9 +568,92 @@ for (const driver of drivers) {
 						);
 					}),
 				).rejects.toThrow();
-			expect(later).toContain("first query failed");
+			expect(later).toContain("a query in this transaction failed");
 			expect(await db.select().from(t.users)).toEqual([]);
 			expect(await logged()).toEqual([]);
+		});
+
+		// Middleware makes the transaction one unit: `after` may depend on every
+		// query having run.
+		test("when a later query fails, the whole transaction fails, even if the callback catches the error", async () => {
+			await reset();
+			const wrapped = withMiddleware(db, () => ({
+				before: [insertLog("before")],
+				after: [insertLog("after")],
+			}));
+			const ok = (tx: any, name: string) => tx.insert(t.users).values({ name });
+			// log.v is NOT NULL.
+			const failing = (tx: any) => tx.insert(t.log).values({ v: null });
+			let later = "not sent";
+			if (driver.sync)
+				expect(() =>
+					wrapped.transaction((tx: any) => {
+						ok(tx, "first").run();
+						expect(() => failing(tx).run()).toThrow();
+						try {
+							ok(tx, "third").run();
+							later = "ran";
+						} catch (error) {
+							later = (error as Error).message;
+						}
+					}),
+				).toThrow();
+			else
+				await expect(
+					wrapped.transaction(async (tx: any) => {
+						await ok(tx, "first");
+						await Promise.resolve(failing(tx)).catch(() => {});
+						later = await Promise.resolve(ok(tx, "third")).then(
+							() => "ran",
+							(error: Error) => error.message,
+						);
+					}),
+				).rejects.toThrow();
+			expect(later).toContain("a query in this transaction failed");
+			expect(await db.select().from(t.users)).toEqual([]);
+			expect(await logged()).toEqual([]);
+		});
+
+		// A savepoint undoes exactly its own part; `before` and `after` are
+		// outside it, so the parent may catch the error and commit.
+		test("a failed query in a savepoint rolls back that savepoint, and the parent may go on", async () => {
+			await reset();
+			const wrapped = withMiddleware(db, () => ({
+				before: [insertLog("before")],
+				after: [insertLog("after")],
+			}));
+			const insert = (q: any, name: string) =>
+				q.insert(t.users).values({ name });
+			const failing = (q: any) => q.insert(t.log).values({ v: null });
+			if (driver.sync)
+				wrapped.transaction((tx: any) => {
+					insert(tx, "kept").run();
+					expect(() =>
+						tx.transaction((savepoint: any) => {
+							insert(savepoint, "rolled back").run();
+							// Caught inside the savepoint: the savepoint still fails.
+							expect(() => failing(savepoint).run()).toThrow();
+						}),
+					).toThrow();
+					insert(tx, "after the savepoint").run();
+				});
+			else
+				await wrapped.transaction(async (tx: any) => {
+					await insert(tx, "kept");
+					await expect(
+						tx.transaction(async (savepoint: any) => {
+							await insert(savepoint, "rolled back");
+							await Promise.resolve(failing(savepoint)).catch(() => {});
+						}),
+					).rejects.toThrow();
+					await insert(tx, "after the savepoint");
+				});
+			expect(
+				(await db.select({ name: t.users.name }).from(t.users)).map(
+					(r: { name: string }) => r.name,
+				),
+			).toEqual(["kept", "after the savepoint"]);
+			expect(await logged()).toEqual(["before", "after"]);
 		});
 
 		test("a rolled-back savepoint does not undo the transaction's before", async () => {

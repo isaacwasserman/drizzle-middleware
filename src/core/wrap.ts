@@ -66,12 +66,6 @@ interface Scope {
 	 * connection after the COMMIT or ROLLBACK.
 	 */
 	ended: boolean;
-	/**
-	 * The error of the scope's first unit (the one that carries `before`).
-	 * If it fails, the whole transaction fails and rolls back, even when the
-	 * callback catches the error.
-	 */
-	failed: { error: unknown } | undefined;
 	/** Units and savepoints admitted by the scope that have not settled. */
 	open: number;
 	/** Resolves `whenIdle`, when `open` goes back to 0. */
@@ -102,35 +96,58 @@ function whenIdle(scope: Scope): Promise<void> {
  * the handler stops that rejection from being reported as unhandled when
  * nothing else waits for it.
  */
-function settlesBefore(
-	scope: Scope,
-	result: PromiseLike<unknown>,
-): Promise<void> {
+function settlesBefore(result: PromiseLike<unknown>): Promise<void> {
 	const done = Promise.resolve(result).then(() => undefined);
-	done.catch((error: unknown) => {
-		scope.failed ??= { error };
-	});
+	done.catch(() => undefined);
 	return done;
 }
 
-/** Runs the scope's first unit; a sync failure marks the scope as failed. */
-function runFirst(scope: Scope, run: () => unknown): unknown {
-	try {
-		return run();
-	} catch (error) {
-		scope.failed ??= { error };
-		throw error;
-	}
+/**
+ * A level of `wrapped.transaction(fn)`: the transaction, or a savepoint in
+ * it. Middleware makes the transaction one unit, all or nothing: a failed
+ * query fails its level, even when the callback catches the error. The
+ * transaction then rolls back; a savepoint rolls back and throws to its
+ * parent, which may catch that. `before` and `after` are outside every
+ * savepoint, so a rolled-back savepoint leaves them complete.
+ */
+interface Level {
+	/** The first query that failed at this level. */
+	failed: { error: unknown } | undefined;
+	readonly parent: Level | undefined;
 }
 
-/** Throws when the scope takes no more work. */
-function assertOpen(scope: Scope): void {
-	if (scope.ended) throw transactionEnded();
-	if (scope.failed)
-		throw new Error(
-			"drizzle-middleware: the transaction's first query failed, so the transaction rolls back.",
-			{ cause: scope.failed.error },
-		);
+/** Runs `run`; a failure marks the state's level as failed. */
+function tracked(state: WrapState, run: () => unknown): unknown {
+	const { level } = state;
+	if (level === undefined) return run();
+	const mark = (error: unknown) => {
+		level.failed ??= { error };
+	};
+	let result: unknown;
+	try {
+		result = run();
+	} catch (error) {
+		mark(error);
+		throw error;
+	}
+	if (isThenable(result)) result.then(undefined, mark);
+	return result;
+}
+
+/** Throws when the scope takes no more work at the state's level. */
+function assertOpen(state: WrapState): void {
+	if (state.scope?.ended) throw transactionEnded();
+	for (let level = state.level; level; level = level.parent)
+		if (level.failed)
+			throw new Error(
+				"drizzle-middleware: a query in this transaction failed, so the transaction rolls back.",
+				{ cause: level.failed.error },
+			);
+}
+
+/** The error that fails `level`, if a query at that level failed. */
+function throwIfFailed(level: Level): void {
+	if (level.failed) throw level.failed.error;
 }
 
 /** The state that a wrapped session carries. */
@@ -148,6 +165,8 @@ interface WrapState {
 	readonly layers: readonly Middleware[];
 	/** Set inside `wrapped.transaction(fn)`. */
 	readonly scope: Scope | undefined;
+	/** The transaction or savepoint level, inside `wrapped.transaction(fn)`. */
+	readonly level: Level | undefined;
 	/** True when `session` is inside a transaction. */
 	readonly inTransaction: boolean;
 }
@@ -365,16 +384,19 @@ function withScope(
 ): unknown {
 	const { scope } = state;
 	if (scope === undefined) return body([]);
-	assertOpen(scope);
+	assertOpen(state);
 	if (scope.beforeDone === undefined) {
-		const result = runFirst(scope, () => body(scope.statements.before));
-		scope.beforeDone = isThenable(result)
-			? settlesBefore(scope, result)
-			: "sync";
+		const result = tracked(state, () => body(scope.statements.before));
+		scope.beforeDone = isThenable(result) ? settlesBefore(result) : "sync";
 		return admit(scope, result);
 	}
 	const done = scope.beforeDone;
-	return admit(scope, done === "sync" ? body([]) : done.then(() => body([])));
+	return admit(
+		scope,
+		tracked(state, () =>
+			done === "sync" ? body([]) : done.then(() => body([])),
+		),
+	);
 }
 
 /**
@@ -386,15 +408,15 @@ function withScope(
 function openNested(state: WrapState, open: () => unknown): unknown {
 	const { scope } = state;
 	if (scope === undefined) return open();
-	assertOpen(scope);
+	assertOpen(state);
 	if (scope.beforeDone === undefined) {
 		const { before } = scope.statements;
 		if (before.length === 0) scope.beforeDone = "sync";
 		else {
-			const ran = runFirst(scope, () =>
+			const ran = tracked(state, () =>
 				runUnit(target(state), { before, after: [] }, []),
 			);
-			scope.beforeDone = isThenable(ran) ? settlesBefore(scope, ran) : "sync";
+			scope.beforeDone = isThenable(ran) ? settlesBefore(ran) : "sync";
 		}
 	}
 	const done = scope.beforeDone;
@@ -413,9 +435,9 @@ function runTransaction(
 		beforeDone: undefined,
 		ended: false,
 		open: 0,
-		failed: undefined,
 		onIdle: undefined,
 	};
+	const root: Level = { failed: undefined, parent: undefined };
 	const finish = (txSession: DrizzleSession): unknown => {
 		if (isEmpty(statements)) return undefined;
 		const remaining: Statements = {
@@ -441,13 +463,14 @@ function runTransaction(
 				rawDb: txDb,
 				layers: [],
 				scope,
+				level: root,
 				inTransaction: true,
 			});
 			if (isSync(state)) {
 				const result = fn(scoped);
 				rejectAsyncCallback(state, result);
 				end();
-				if (scope.failed) throw scope.failed.error;
+				throwIfFailed(root);
 				finish(txDb.session);
 				return result;
 			}
@@ -463,7 +486,7 @@ function runTransaction(
 				end();
 				await whenIdle(scope);
 				if ("error" in outcome) throw outcome.error;
-				if (scope.failed) throw scope.failed.error;
+				throwIfFailed(root);
 				if (scope.beforeDone instanceof Promise) await scope.beforeDone;
 				await finish(txDb.session);
 				return outcome.value;
@@ -605,6 +628,7 @@ function unwrappedState(
 		rawDb: { session, dialect: session.dialect },
 		layers: [],
 		scope: undefined,
+		level: undefined,
 		inTransaction: false,
 	};
 }
@@ -663,15 +687,29 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 						Reflect.apply(nested, rawDb, [
 							(rawNested: unknown) => {
 								const nestedDb = asDrizzleDb(rawNested);
+								const level: Level = {
+									failed: undefined,
+									parent: state.level,
+								};
 								const result = fn(
 									wrapDb(nestedDb, {
 										...state,
 										session: nestedDb.session,
 										rawDb: nestedDb,
+										level,
 									}),
 								);
 								rejectAsyncCallback(state, result);
-								return result;
+								// A failed query rolls the savepoint back, even when the
+								// callback caught it.
+								if (!isThenable(result)) {
+									throwIfFailed(level);
+									return result;
+								}
+								return Promise.resolve(result).then((value) => {
+									throwIfFailed(level);
+									return value;
+								});
 							},
 							...rest,
 						]),
@@ -683,7 +721,7 @@ function wrapDb(input: DrizzleDb, state: WrapState): unknown {
 		if (typeof setTransaction === "function")
 			Object.defineProperty(db, "setTransaction", {
 				value: (...args: unknown[]) => {
-					if (state.scope) assertOpen(state.scope);
+					assertOpen(state);
 					return Reflect.apply(setTransaction, rawDb, args);
 				},
 			});
@@ -721,6 +759,7 @@ export function withMiddlewareWith(
 		rawDb: inner?.rawDb ?? db,
 		layers: [middleware, ...(inner?.layers ?? [])],
 		scope: undefined,
+		level: undefined,
 		inTransaction: false,
 	};
 	return wrapDb(db, state);

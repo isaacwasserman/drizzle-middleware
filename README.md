@@ -48,6 +48,12 @@ The middleware factory is called for each unit. It returns the `before` and `aft
 
 ## Guarantees
 
+The package follows three rules:
+
+1. **Transactions keep the database's semantics:** isolation, locking, savepoints and options.
+2. **The middleware runs, or the query fails.** A unit with middleware is all or nothing, on every database.
+3. **One round trip per unit,** unless the driver cannot do it (see the driver table).
+
 For every unit (the `before` statements, one or more queries, the `after` statements):
 
 1. **Order.** `before`, the queries, then `after`.
@@ -79,7 +85,7 @@ await withMiddleware(baseDb, middleware).transaction(async (tx) => {
 
 `setTransaction()` on a wrapped transaction runs without middleware, because Postgres requires `SET TRANSACTION` to be the first statement of a transaction.
 
-If the first query of the transaction fails (it also carries `before`), the whole transaction fails and rolls back, even if the callback catches the error: later work on `tx` throws, and the transaction rejects with the first query's error. When the callback settles, the transaction closes for new work: a query on `tx` that starts after that throws. Work that started before, for example a query that the callback did not await, finishes inside the transaction before the COMMIT or ROLLBACK. A `tx` that you keep after its transaction ends throws on each query. On bun:sqlite and better-sqlite3, the transaction callback must be sync: the driver commits when the callback returns, so an async callback throws a `TypeError`, and its transaction rolls back.
+The transaction is one unit with its middleware, so if any query in it fails, the whole transaction fails and rolls back, even if the callback catches the error: later work on `tx` throws, and the transaction rejects with the first error. To undo only part of the work, use a savepoint (`tx.transaction(...)`): a failed query in it rolls back that savepoint, and you can catch its error and go on. When the callback settles, the transaction closes for new work: a query on `tx` that starts after that throws. Work that started before, for example a query that the callback did not await, finishes inside the transaction before the COMMIT or ROLLBACK. A `tx` that you keep after its transaction ends throws on each query. On bun:sqlite and better-sqlite3, the transaction callback must be sync: the driver commits when the callback returns, so an async callback throws a `TypeError`, and its transaction rolls back.
 
 ## Stacking
 

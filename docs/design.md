@@ -2,6 +2,16 @@
 
 Status: implemented for the first release (node-postgres, postgres-js, Bun SQL Postgres, PGlite, bun:sqlite, better-sqlite3, Bun SQL SQLite). The other drivers in section 5 are planned; `withMiddleware` throws for them.
 
+## 0. Rules
+
+Every other section follows from these three rules. A behavior that breaks one of them is a bug.
+
+1. **Transactions keep the database's semantics:** isolation, locking, savepoints, transaction options, commit and rollback. The package adds only what rule 2 needs.
+2. **The middleware runs, or the query fails.** A unit with middleware is all or nothing, on every database: the inner function cannot know what `before` and `after` need (for example, `after` may be needed for the state that `before` left to be correct), so if any statement of the unit fails, the whole unit fails. That the package runs a unit as a transaction is an implementation detail; the dialect does not change this rule. In `wrapped.transaction(fn)`, the unit is the transaction: any failed query fails the whole transaction, even when `fn` catches the error. A savepoint that fails rolls back only its own part, because `before` and `after` are outside it; its error goes to the parent, which may catch it.
+3. **One round trip per unit, unless the driver cannot do it.** The exceptions are listed in section 5: Bun SQL with `prepare: false` or before Bun 1.4 (Bun does not pipeline), postgres-js for a unit longer than `max_pipeline`, and the in-process drivers (no network).
+
+The tests for each rule are listed in section 11.
+
 ## 1. Goals
 
 1. **Fail closed.** If the package cannot run the middleware with the guarantees in section 3, the query does not run. It throws.
@@ -34,9 +44,9 @@ The package cannot check what the middleware statements do. Session-level state 
 |---|---|
 | A query on a wrapped db | `before`, the query, `after` |
 | `executeBatchTransaction([...])` | `before`, all queries in order, `after` |
-| `wrapped.transaction(fn)` | `before` is sent with the first query in the transaction. `after` is sent as one batch before the commit. The factory is called once for the transaction. If the scope's first unit (the one that carries `before`) fails, the whole transaction fails and rolls back, even when `fn` catches the error: later work on `tx` throws, and the transaction rejects with that error. When `fn` settles, the scope closes: new work on `tx` (a query, a batch, a savepoint, `setTransaction()`) throws. Work that the scope admitted before finishes before `after` and the COMMIT or ROLLBACK, so no statement of the scope reaches the connection after them. |
+| `wrapped.transaction(fn)` | `before` is sent with the first query in the transaction. `after` is sent as one batch before the commit. The factory is called once for the transaction. If any query fails, the whole transaction fails and rolls back, even when `fn` catches the error (rule 2): later work on `tx` throws, and the transaction rejects with the first error. When `fn` settles, the scope closes: new work on `tx` (a query, a batch, a savepoint, `setTransaction()`) throws. Work that the scope admitted before finishes before `after` and the COMMIT or ROLLBACK, so no statement of the scope reaches the connection after them. |
 | `withMiddleware(tx)` (a transaction) | Throws. Most drivers do not show when a transaction has ended: node-postgres, postgres-js and Bun SQL run queries on a kept transaction object after its end, on a connection that another request can use. So only a db can be wrapped, and `wrapped.transaction(fn)` tracks the end of its own transactions. |
-| A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. In `wrapped.transaction(fn)`, if the scope's `before` has not run yet, it runs on the parent before the savepoint opens, so a rolled-back savepoint cannot undo it. |
+| A nested transaction (savepoint) on a wrapped transaction | Same rules as its parent. The savepoint is opened by the driver on the unwrapped transaction. A failed query in it fails the savepoint, even when its callback catches the error: the savepoint rolls back and throws to its parent. In `wrapped.transaction(fn)`, if the scope's `before` has not run yet, it runs on the parent before the savepoint opens, so a rolled-back savepoint cannot undo it. |
 
 `setTransaction()` on a wrapped transaction runs without middleware, as the first statement, because Postgres rejects `SET TRANSACTION` after any other statement. It is a transaction-control statement and reads no data; this is a reviewed exception. Because `before` goes out with the first query of a transaction, the order stays valid.
 
@@ -158,18 +168,30 @@ A driver counts as supported only when its tests run against the real driver (se
 
 ## 11. Tests
 
-1. **The driver matrix** (`test/drivers.test.ts`): each test of the shared behavior runs on every supported driver, against the real driver (Postgres in CI for the TCP drivers). Driver-specific behavior has its own file: the round-trip count through a counting proxy (`pg-drivers.test.ts`), the sync SQLite transaction rules (`e2e-sqlite.test.ts`), the Bun SQL SQLite queue (`e2e-bun-sql-sqlite.test.ts`), and concurrency (`concurrency.test.ts`).
-2. **Security regression suite.** Each audit finding becomes a test:
-   - replay of a previous query after `toSQL()` or a batch;
-   - SQL injection with `standard_conforming_strings = off`;
-   - a db with a query cache is rejected;
-   - neon-http auth token dropped;
-   - errors swallowed on Bun SQL SQLite;
-   - `bytea`, blob, `NaN` and `Date` values;
-   - `db.batch()` and `session.migrate()` skipping the middleware.
-3. **Member review** (kept from v1).
-4. **Encoder tests** with fixed cases (section 6).
-5. **The v1 tests**, copied (e2e) or rewritten as behavior tests (unit), in `test/`, where they still apply to a supported driver. A driver that gets an entry later gets its tests with the entry.
+Each rule of section 0 has tests. The driver matrix (`test/drivers.test.ts`) runs each shared test on all 11 driver configurations.
+
+**Rule 1: the database's transaction semantics**
+- `drivers.test.ts`: savepoints on a stacked db; a savepoint that fails rolls back only its part; `before` with the first query and `after` before the commit.
+- `pg.test.ts`: `wrapped.transaction` forwards the transaction config (isolation level).
+- `security.test.ts`: `setTransaction()` in `wrapped.transaction` runs first.
+
+**Rule 2: the middleware runs, or the query fails**
+- `drivers.test.ts`, units: `before`, the query and `after` run in order; a failing statement rolls back the whole unit; every query API runs the middleware once; stacked layers; `executeBatchTransaction`, also with stacked layers, in `wrapped.transaction`, and with builders from a raw transaction.
+- `drivers.test.ts`, transactions: a failed first query and a failed later query fail the whole transaction, even when the callback catches the error; a rolled-back savepoint does not undo `before`; a query that starts after the callback settles throws; work admitted before the end finishes inside the transaction; a kept `tx` throws.
+- `concurrency.test.ts`: one request's middleware state never reaches another request, on pools and on single connections (`pg.Client`, a Bun SQL reserved connection, Bun SQL SQLite).
+- `pg-drivers.test.ts`: a statement that postgres-js retries cannot run outside its unit; a transaction handle as the client is rejected; a lost connection or a value that cannot be converted leaves no stuck or broken connection.
+- `e2e-sqlite.test.ts`: an async callback in a sync transaction throws.
+- `guard-members.test.ts`: every Drizzle session and prepared-query member is on the allowed or the denied list; `security.test.ts`: the v1 audit findings.
+- `pg.test.ts`, `sqlite.test.ts`: `withMiddleware` rejects a transaction; unknown members are blocked.
+
+**Rule 3: one round trip**
+- `pg-drivers.test.ts`: a proxy counts round trips. A wrapped query, and the first query in `wrapped.transaction`, take exactly one, on each TCP driver that can pipeline.
+- `driver-plan.test.ts`: every Drizzle session kind has a planned strategy.
+
+**Other**
+- `pg-inline.test.ts`: the inline encoder, with fixed cases against Postgres.
+- `internal-drizzle.test.ts`: the checks of Drizzle's internals.
+- `types.test-d.ts`: the public types.
 
 ## 12. Open questions
 
