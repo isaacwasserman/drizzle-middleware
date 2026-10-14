@@ -1,22 +1,12 @@
 {
 	"name": "drizzle-middleware",
 	"version": "0.1.0",
-	"description": "Drizzle ORM query middleware",
+	"description": "Drizzle ORM query middleware for node-postgres, in one round trip",
 	"type": "module",
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
 	"exports": {
-		".": {
-			"import": "./dist/index.js",
-			"types": "./dist/index.d.ts"
-		},
-		"./pg": {
-			"import": "./dist/pg.js",
-			"types": "./dist/pg.d.ts"
-		},
-		"./sqlite": {
-			"import": "./dist/sqlite.js",
-			"types": "./dist/sqlite.d.ts"
+		"./node-postgres": {
+			"types": "./dist/node-postgres.d.ts",
+			"import": "./dist/node-postgres.js"
 		}
 	},
 	"scripts": {
@@ -36,12 +26,14 @@
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
 		"@changesets/cli": "^2.30.0",
-		"@electric-sql/pglite": "^0.5.7",
 		"@types/bun": "latest",
+		"@types/pg": "^8.23.1",
 		"drizzle-orm-beta": "^1.0.0-beta.22",
+		"pg": "^8.23.1",
 		"typescript": "7"
 	},
 	"peerDependencies": {
-		"drizzle-orm": ">=1.0.0-0"
+		"drizzle-orm": ">=1.0.0-0",
+		"pg": ">=8.23.0"
 	}
 }
