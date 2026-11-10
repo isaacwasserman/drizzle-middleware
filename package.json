@@ -28,12 +28,12 @@
 		"@changesets/cli": "^2.30.0",
 		"@types/bun": "latest",
 		"@types/pg": "^8.23.1",
-		"drizzle-orm-beta": "^1.0.0-beta.22",
+		"drizzle-orm-beta": "npm:drizzle-orm@1.0.0-rc.5",
 		"pg": "^8.23.1",
 		"typescript": "7"
 	},
 	"peerDependencies": {
-		"drizzle-orm": ">=1.0.0-0",
+		"drizzle-orm": ">=1.0.0-rc.5",
 		"pg": ">=8.23.0"
 	}
 }

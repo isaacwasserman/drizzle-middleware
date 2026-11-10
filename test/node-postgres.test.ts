@@ -1117,9 +1117,19 @@ describe("the query cache", () => {
 	test("queries that Drizzle does not cache run as units", async () => {
 		const { db, cache } = cachedDb(auditing);
 		await db.execute(sql`select 1`);
-		await db.query.users.findMany();
 		expect(cache.keys).toEqual([]);
-		expect(await logRows()).toHaveLength(4);
+		expect(await logRows()).toHaveLength(2);
+	});
+
+	test("a relational query uses the key of the whole unit", async () => {
+		const { db, cache } = cachedDb(auditing);
+		await db.query.users.findMany();
+		const trips = await proxy.count(() => db.query.users.findMany());
+		expect(trips).toBe(0);
+		expect(cache.keys).toHaveLength(1);
+		const { sql: text, params } = db.query.users.findMany().toSQL();
+		expect(cache.keys).not.toContain(await hashQuery(text, params));
+		expect(await logRows()).toHaveLength(2);
 	});
 
 	test("a failed query is not stored and throws as without the cache", async () => {
@@ -1209,7 +1219,7 @@ describe("withMiddleware on the app's transaction", () => {
 			const trips = await proxy.count(async () => {
 				({
 					rows: [row],
-				} = await db.execute(
+				} = await db.execute<{ tenant: string | null; txid: string }>(
 					sql`select current_setting('app.tenant', true) as tenant, txid_current()::text as txid`,
 				));
 			});
@@ -1441,7 +1451,7 @@ describe("withMiddleware on the app's transaction", () => {
 			const results = await Promise.all([
 				db.select().from(users),
 				testTx.execute(sql`select pg_sleep(0.1)`),
-				testTx.execute(sql`select 1 as one`),
+				testTx.execute<{ one: number }>(sql`select 1 as one`),
 			]);
 			expect(results[2].rows).toEqual([{ one: 1 }]);
 			expect(client.pipeline).toBe(false);

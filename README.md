@@ -2,7 +2,7 @@
 
 Query middleware for [Drizzle ORM](https://orm.drizzle.team) on [node-postgres](https://node-postgres.com). It runs SQL statements before and after each query, in the same transaction and in one round trip. Use it for RLS, tenant isolation, audit trails or session settings.
 
-Requirements: `drizzle-orm` 1.0 beta or later, `pg` 8.23 or later, and a `pg.Pool`.
+Requirements: `drizzle-orm` 1.0.0-rc.5 or later, `pg` 8.23 or later, and a `pg.Pool`.
 
 ## Install
 
