@@ -1,4 +1,10 @@
-import { DrizzleQueryError, SQL, fillPlaceholders, is } from "drizzle-orm-beta";
+import {
+	DrizzleQueryError,
+	SQL,
+	entityKind,
+	fillPlaceholders,
+	is,
+} from "drizzle-orm-beta";
 import {
 	Cache,
 	NoopCache,
@@ -113,7 +119,7 @@ function control(
 }
 
 function compile(
-	dialect: NodePgSession<any, any, any>["dialect"],
+	dialect: NodePgSession<any>["dialect"],
 	middleware: Middleware,
 ): CompiledMiddleware {
 	const result = middleware();
@@ -668,6 +674,9 @@ function unitKey(
  * still invalidates. Used inside db.transaction(), and for `cache: false`.
  */
 class WriteOnlyCache extends Cache {
+	static override readonly [entityKind]: string =
+		"DrizzleMiddlewareWriteOnlyCache";
+
 	constructor(private readonly cache: Cache) {
 		super();
 	}
@@ -689,7 +698,9 @@ type QueryWithCache = (
 	query: () => Promise<unknown>,
 ) => Promise<unknown>;
 
-class MiddlewareSession extends NodePgSession<any, any, any> {
+class MiddlewareSession extends NodePgSession<any> {
+	static override readonly [entityKind]: string = "DrizzleMiddlewareSession";
+
 	/**
 	 * The middleware that the next client.query() call must use. A cached
 	 * query calls the middleware before the cache lookup; the unit that runs
@@ -704,9 +715,8 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 	constructor(
 		private readonly pool: pg.Pool,
 		private readonly middleware: Middleware,
-		dialect: NodePgSession<any, any, any>["dialect"],
+		dialect: NodePgSession<any>["dialect"],
 		private readonly relationsArg: any,
-		private readonly schemaArg: any,
 		private readonly optionsArg: any,
 	) {
 		const slot: { next?: CompiledMiddleware } = {};
@@ -719,7 +729,6 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 			}),
 			dialect,
 			relationsArg,
-			schemaArg,
 			optionsArg,
 		);
 		this.slot = slot;
@@ -732,10 +741,6 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 
 	override prepareQuery(...args: any[]): any {
 		return this.withUnitCache((super.prepareQuery as any)(...args));
-	}
-
-	override prepareRelationalQuery(...args: any[]): any {
-		return this.withUnitCache((super.prepareRelationalQuery as any)(...args));
 	}
 
 	/** Makes the prepared query use the hash of the whole unit as its key. */
@@ -788,7 +793,11 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 			const fromCache = await cache.get(key, tables, false, autoInvalidate);
 			if (fromCache !== undefined) return fromCache;
 			const result = await runUnitQuery().catch((error) => {
-				throw new DrizzleQueryError(queryString, params, error);
+				throw new DrizzleQueryError(
+					queryString,
+					query.paramsInErrors ? params : undefined,
+					error,
+				);
 			});
 			await cache.put(key, result, autoInvalidate ? tables : [], false, config);
 			return result;
@@ -800,18 +809,17 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 	private plainSession(
 		client: unknown,
 		options: any = this.optionsArg,
-	): NodePgSession<any, any, any> {
+	): NodePgSession<any> {
 		return new NodePgSession(
 			client as any,
 			this.dialect,
 			this.relationsArg,
-			this.schemaArg,
 			options,
 		);
 	}
 
 	override async transaction<T>(
-		transaction: (tx: NodePgTransaction<any, any, any>) => Promise<T>,
+		transaction: (tx: NodePgTransaction<any>) => Promise<T>,
 		config?: PgTransactionConfig,
 	): Promise<T> {
 		const middleware = compile(this.dialect, this.middleware);
@@ -837,7 +845,8 @@ class MiddlewareSession extends NodePgSession<any, any, any> {
 				this.dialect,
 				session,
 				this.relationsArg,
-				this.schemaArg,
+				undefined,
+				false,
 			);
 			let result: T;
 			try {
@@ -885,13 +894,15 @@ async function runSavepointUnit(
 }
 
 /** The session of a transaction of the app, with middleware. */
-class SavepointSession extends NodePgSession<any, any, any> {
+class SavepointSession extends NodePgSession<any> {
+	static override readonly [entityKind]: string =
+		"DrizzleMiddlewareSavepointSession";
+
 	constructor(
 		private readonly borrowed: BorrowedClient,
 		private readonly middleware: Middleware,
-		dialect: NodePgSession<any, any, any>["dialect"],
+		dialect: NodePgSession<any>["dialect"],
 		private readonly relationsArg: any,
-		private readonly schemaArg: any,
 		private readonly optionsArg: any,
 		private readonly nestedIndex: number,
 	) {
@@ -906,17 +917,15 @@ class SavepointSession extends NodePgSession<any, any, any> {
 			}),
 			dialect,
 			relationsArg,
-			schemaArg,
 			optionsArg,
 		);
 	}
 
-	private plainSession(client: unknown): NodePgSession<any, any, any> {
+	private plainSession(client: unknown): NodePgSession<any> {
 		return new NodePgSession(
 			client as any,
 			this.dialect,
 			this.relationsArg,
-			this.schemaArg,
 			this.optionsArg,
 		);
 	}
@@ -927,7 +936,7 @@ class SavepointSession extends NodePgSession<any, any, any> {
 	 * transactions.
 	 */
 	override async transaction<T>(
-		transaction: (tx: NodePgTransaction<any, any, any>) => Promise<T>,
+		transaction: (tx: NodePgTransaction<any>) => Promise<T>,
 		_config?: PgTransactionConfig,
 	): Promise<T> {
 		const middleware = compile(this.dialect, this.middleware);
@@ -939,8 +948,8 @@ class SavepointSession extends NodePgSession<any, any, any> {
 				this.dialect,
 				session,
 				this.relationsArg,
-				this.schemaArg,
 				this.nestedIndex,
+				false,
 			);
 			return plain.transaction(transaction);
 		}
@@ -955,8 +964,8 @@ class SavepointSession extends NodePgSession<any, any, any> {
 				gate((queryConfig, values) => scope.query(queryConfig, values)),
 			),
 			this.relationsArg,
-			this.schemaArg,
 			this.nestedIndex + 1,
+			false,
 		);
 		let result: T;
 		try {
@@ -976,9 +985,12 @@ class SavepointSession extends NodePgSession<any, any, any> {
 }
 
 /** A transaction of the app, with middleware. */
-class MiddlewareTransaction extends NodePgTransaction<any, any, any> {
+class MiddlewareTransaction extends NodePgTransaction<any> {
+	static override readonly [entityKind]: string =
+		"DrizzleMiddlewareTransaction";
+
 	override transaction<T>(
-		transaction: (tx: NodePgTransaction<any, any, any>) => Promise<T>,
+		transaction: (tx: NodePgTransaction<any>) => Promise<T>,
 		config?: PgTransactionConfig,
 	): Promise<T> {
 		return ((this as any).session as SavepointSession).transaction(
@@ -989,7 +1001,7 @@ class MiddlewareTransaction extends NodePgTransaction<any, any, any> {
 }
 
 function withTransactionMiddleware(
-	tx: NodePgTransaction<any, any, any>,
+	tx: NodePgTransaction<any>,
 	middleware: Middleware,
 ): any {
 	const session = (tx as any).session;
@@ -1026,7 +1038,6 @@ function withTransactionMiddleware(
 		middleware,
 		session.dialect,
 		session.relations,
-		session.schema,
 		sessionOptions,
 		(tx as any).nestedIndex,
 	);
@@ -1034,8 +1045,8 @@ function withTransactionMiddleware(
 		session.dialect,
 		wrappedSession as any,
 		session.relations,
-		session.schema,
 		(tx as any).nestedIndex,
+		false,
 	);
 }
 
@@ -1056,8 +1067,8 @@ function describe(value: unknown): string {
  */
 export function withMiddleware<
 	TDb extends
-		| (NodePgDatabase<any, any> & { $client: pg.Pool })
-		| NodePgTransaction<any, any, any>,
+		| (NodePgDatabase<any> & { $client: pg.Pool })
+		| NodePgTransaction<any>,
 >(db: TDb, middleware: Middleware, options: MiddlewareOptions = {}): TDb {
 	if (typeof middleware !== "function") {
 		fail("the middleware must be a function.");
@@ -1105,14 +1116,12 @@ export function withMiddleware<
 		middleware,
 		session.dialect,
 		session.relations,
-		session.schema,
 		sessionOptions,
 	);
 	const wrapped: any = new NodePgDatabase(
 		session.dialect,
 		wrappedSession as any,
 		session.relations,
-		session.schema,
 	);
 	wrapped.$client = (db as any).$client;
 	wrapped.$cache = (db as any).$cache;
