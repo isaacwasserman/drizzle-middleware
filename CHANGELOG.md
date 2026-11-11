@@ -1,5 +1,20 @@
 # drizzle-middleware
 
+## 0.2.0
+
+### Minor Changes
+
+- 05ef5e0: Support drizzle-orm 1.0.0-rc.5, which is now the lowest supported version. The package builds sessions and transactions with the rc.5 constructor arguments, and gives its own classes their own entity kind, because rc.5 matches `instanceof` by entity kind. Relational queries now use the query cache, keyed on the whole unit, when the cache strategy is `all`.
+- 3333853: Rewrite the package for node-postgres only. The only entry point is `drizzle-middleware/node-postgres`. `withMiddleware(db, middleware)` accepts only a db from `drizzle-orm/node-postgres` that uses a `pg.Pool`, and throws for all other drivers and clients.
+
+  A query outside a transaction runs as `BEGIN; before; query; after; COMMIT` in one round trip, through pg's pipeline mode. Values stay bound parameters. In `db.transaction()`, `before` goes with the first query and `after` goes with `COMMIT`, so the middleware adds no round trips.
+
+  A db with a Drizzle query cache uses it for reads. The cache key of a read is the hash of the whole unit, so a result is used again only for the same middleware statements and values. A cache hit does not run the middleware; `withMiddleware(db, middleware, { cache: false })` turns off reads from the cache.
+
+  `withMiddleware` also takes a transaction of such a db (for example from a test harness that rolls back). Each query then runs as `SAVEPOINT; before; query; after; RELEASE` in one round trip.
+
+  Removed: the `pg`, `sqlite` and root entry points, SQLite and all other Postgres drivers, `executeBatchTransaction`, and middleware on a wrapped db.
+
 ## 0.1.0
 
 ### Minor Changes
